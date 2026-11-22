@@ -51,6 +51,17 @@ src/
 supabase/migrations/          Database schema, row-level security, XP function
 ```
 
+## Payments mode
+
+Set `PAYMENTS_MODE` to choose how Pro works:
+
+| Value | What happens | Needs |
+| --- | --- | --- |
+| `off` | "Unlock Pro (free)" gives the signed-in user Pro straight away, no checkout | Supabase only |
+| `stripe` | "Upgrade to Pro" opens Stripe Checkout for the monthly subscription | Supabase + Stripe |
+
+If `PAYMENTS_MODE` is not set, the app uses `stripe` when `STRIPE_SECRET_KEY` is set and `off` otherwise. Users unlocked in `off` mode keep Pro after you switch to `stripe` (their subscription row has an ID starting with `free-unlock-`); remove those rows in Supabase if you want them to pay.
+
 ## Setup
 
 ### 1. Supabase
@@ -60,7 +71,7 @@ supabase/migrations/          Database schema, row-level security, XP function
 3. Under **Authentication -> URL Configuration**, set the Site URL to your app URL and add `<your-url>/auth/callback` to the redirect URLs.
 4. Copy the project URL, anon key and service-role key from **Project Settings -> API**.
 
-### 2. Stripe (start in test mode)
+### 2. Stripe (start in test mode; skip this whole step with `PAYMENTS_MODE=off`)
 
 1. Create a product "Pro" with a **recurring monthly price**. Copy its price ID (`price_...`).
 2. Turn on the **Customer portal** under Settings -> Billing -> Customer portal.
