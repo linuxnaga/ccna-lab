@@ -1,4 +1,5 @@
 import { Check } from "lucide-react";
+import { connection } from "next/server";
 import { StripeButton } from "@/components/StripeButton";
 import { createClient } from "@/lib/supabase/server";
 import { getSubscription, isPro } from "@/lib/entitlements";
@@ -12,6 +13,7 @@ const PRO = ["Every lab in every course", "New vendor tracks as they launch (F5,
 
 export default async function PricingPage({ searchParams }: { searchParams: Promise<{ canceled?: string }> }) {
   const { canceled } = await searchParams;
+  await connection();
   const supabase = await createClient();
   const {
     data: { user },
