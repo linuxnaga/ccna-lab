@@ -26,3 +26,25 @@ body {
 .glow-cyan {
   box-shadow: 0 0 0 1px rgba(34, 211, 238, 0.3), 0 0 24px rgba(34, 211, 238, 0.12);
 }
+
+.confetti-piece {
+  position: absolute;
+  top: -12px;
+  width: 8px;
+  height: 14px;
+  border-radius: 2px;
+  animation-name: confetti-fall;
+  animation-timing-function: ease-in;
+  animation-fill-mode: forwards;
+}
+
+@keyframes confetti-fall {
+  to {
+    transform: translateY(110vh) rotate(720deg);
+    opacity: 0.2;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .confetti-piece { display: none; }
+}
