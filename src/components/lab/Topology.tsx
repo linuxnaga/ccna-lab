@@ -37,6 +37,8 @@ function DeviceIcon({ d, active }: { d: TopologyDevice; active: boolean }) {
   }
 }
 
+const labelPos = (d: TopologyDevice) => d.labelPos ?? (d.kind === "pc" ? "below" : "left");
+
 export function TopologyView({
   topology,
   status,
@@ -52,7 +54,7 @@ export function TopologyView({
   return (
     <svg viewBox="0 0 1000 600" className="h-full w-full" role="img" aria-label="Network topology">
       <defs>
-        <filter id="glow" x="-50%" y="-50%" width="200%" height="200%">
+        <filter id="glow" filterUnits="userSpaceOnUse" x="-100" y="-100" width="1200" height="800">
           <feGaussianBlur stdDeviation="3" result="b" />
           <feMerge><feMergeNode in="b" /><feMergeNode in="SourceGraphic" /></feMerge>
         </filter>
@@ -99,12 +101,12 @@ export function TopologyView({
           <circle r={48} fill="transparent" />
           <DeviceIcon d={d} active={d.id === active} />
           <text
-            x={d.kind === "pc" ? 0 : d.kind === "switch" ? -48 : -42}
-            y={d.kind === "pc" ? 40 : 6}
+            x={labelPos(d) === "left" ? (d.kind === "switch" ? -48 : -42) : 0}
+            y={labelPos(d) === "below" ? 40 : labelPos(d) === "above" ? -42 : 6}
             fill={d.id === active ? "#67e8f9" : "#e2e8f0"}
             fontSize={18}
             fontWeight={600}
-            textAnchor={d.kind === "pc" ? "middle" : "end"}
+            textAnchor={labelPos(d) === "left" ? "end" : "middle"}
             fontFamily="monospace"
           >
             {d.label}

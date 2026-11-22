@@ -13,6 +13,8 @@ export interface TopologyDevice {
   /** Position in the SVG viewBox (0..1000 x 0..600). */
   x: number;
   y: number;
+  /** Where to draw the name. Default: below PCs, left of everything else. */
+  labelPos?: "below" | "left" | "above";
 }
 
 export interface LinkEnd {

@@ -1,7 +1,8 @@
 import { NextResponse, type NextRequest } from "next/server";
 import { createClient } from "@/lib/supabase/server";
 import { createAdminClient } from "@/lib/supabase/admin";
-import { getLab, HINT_COST } from "@/lib/courses";
+import { getCourse, getLab, HINT_COST } from "@/lib/courses";
+import { isUnlocked } from "@/lib/progression";
 import { canPlay, getSubscription } from "@/lib/entitlements";
 
 /**
@@ -28,6 +29,16 @@ export async function POST(request: NextRequest) {
   if (!lab) return NextResponse.json({ error: "Unknown lab" }, { status: 404 });
   if (!canPlay(lab, await getSubscription(supabase, user.id))) {
     return NextResponse.json({ error: "Pro required" }, { status: 403 });
+  }
+
+  const { data: done } = await supabase
+    .from("lab_progress")
+    .select("lab_id")
+    .eq("user_id", user.id)
+    .eq("course_id", courseId)
+    .not("completed_at", "is", null);
+  if (!isUnlocked(getCourse(courseId)!, labId, new Set((done ?? []).map((d) => d.lab_id as string)))) {
+    return NextResponse.json({ error: "Complete the previous mission first" }, { status: 403 });
   }
 
   const xp = Math.max(0, lab.xp - hintsUsed * HINT_COST);
