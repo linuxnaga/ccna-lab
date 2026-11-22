@@ -1,9 +1,11 @@
 import Link from "next/link";
+import { connection } from "next/server";
 import { Network } from "lucide-react";
 import { createClient } from "@/lib/supabase/server";
 import { BRAND } from "@/lib/site";
 
 export async function NavBar() {
+  await connection();
   const supabase = await createClient();
   const {
     data: { user },
