@@ -7,9 +7,10 @@ import { domainBadges } from "@/lib/progression";
 import { Hud } from "@/components/Hud";
 import { SkillMap } from "@/components/SkillMap";
 import { StripeButton } from "@/components/StripeButton";
+import { paymentsMode } from "@/lib/billing";
 
-export default async function Dashboard({ searchParams }: { searchParams: Promise<{ checkout?: string }> }) {
-  const { checkout } = await searchParams;
+export default async function Dashboard({ searchParams }: { searchParams: Promise<{ checkout?: string; unlocked?: string }> }) {
+  const { checkout, unlocked } = await searchParams;
   const supabase = await createClient();
   const {
     data: { user },
@@ -23,12 +24,18 @@ export default async function Dashboard({ searchParams }: { searchParams: Promis
   ]);
 
   const pro = isPro(sub);
+  const payments = paymentsMode();
   const completedIn = (courseId: string) =>
     new Set((progress ?? []).filter((p) => p.completed_at && p.course_id === courseId).map((p) => p.lab_id as string));
   const ccna = COURSES[0];
 
   return (
     <div className="mx-auto max-w-6xl px-4 py-10">
+      {unlocked && (
+        <p className="mb-6 rounded-md border border-emerald-500/40 bg-emerald-500/10 p-3 text-sm text-emerald-200">
+          Pro unlocked. Every mission is open to you.
+        </p>
+      )}
       {checkout === "success" && (
         <p className="mb-6 rounded-md border border-emerald-500/40 bg-emerald-500/10 p-3 text-sm text-emerald-200">
           Payment received. Pro access turns on as soon as Stripe confirms it, usually within a few seconds. Refresh if missions still show as Pro.
@@ -42,8 +49,10 @@ export default async function Dashboard({ searchParams }: { searchParams: Promis
         </div>
         <div className="flex items-center gap-3">
           <span className={`rounded border px-2 py-1 font-mono text-xs ${pro ? "border-cyan-400/50 text-cyan-300" : "border-slate-600 text-slate-400"}`}>{pro ? "PRO" : "FREE"}</span>
-          {pro ? (
+          {pro && payments === "off" ? null : pro ? (
             <StripeButton endpoint="/api/stripe/portal" className="text-sm text-cyan-300 hover:underline">Manage subscription</StripeButton>
+          ) : payments === "off" ? (
+            <StripeButton endpoint="/api/billing/unlock" className="rounded-md bg-cyan-500 px-4 py-2 text-sm font-medium text-slate-950 hover:bg-cyan-400">Unlock Pro (free)</StripeButton>
           ) : (
             <StripeButton endpoint="/api/stripe/checkout" className="rounded-md bg-cyan-500 px-4 py-2 text-sm font-medium text-slate-950 hover:bg-cyan-400">Upgrade to Pro</StripeButton>
           )}

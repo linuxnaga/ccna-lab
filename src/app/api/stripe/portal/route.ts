@@ -2,9 +2,11 @@ import { NextResponse } from "next/server";
 import { createClient } from "@/lib/supabase/server";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { stripe, siteUrl } from "@/lib/stripe";
+import { paymentsMode } from "@/lib/billing";
 
 /** Opens the Stripe Billing Portal so users can cancel or update payment details. */
 export async function POST() {
+  if (paymentsMode() !== "stripe") return NextResponse.json({ error: "Payments are turned off" }, { status: 404 });
   const supabase = await createClient();
   const {
     data: { user },

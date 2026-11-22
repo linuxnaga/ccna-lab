@@ -9,7 +9,7 @@ export function StripeButton({
   children,
   className,
 }: {
-  endpoint: "/api/stripe/checkout" | "/api/stripe/portal";
+  endpoint: "/api/stripe/checkout" | "/api/stripe/portal" | "/api/billing/unlock";
   children: React.ReactNode;
   className?: string;
 }) {
@@ -28,8 +28,13 @@ export function StripeButton({
       }
       const body = await res.json();
       if (!res.ok || !body.url) throw new Error(body.error ?? "Something went wrong");
-      // External Stripe-hosted page.
-      window.location.assign(body.url);
+      if (body.url.startsWith("/")) {
+        router.push(body.url);
+        router.refresh();
+      } else {
+        // External Stripe-hosted page.
+        window.location.assign(body.url);
+      }
     } catch (e) {
       setError(e instanceof Error ? e.message : "Something went wrong");
       setBusy(false);
