@@ -1,6 +1,7 @@
 import Link from "next/link";
 import { notFound, redirect } from "next/navigation";
-import { Lock, Wrench } from "lucide-react";
+import { Lock } from "lucide-react";
+import { LabWorkspace } from "@/components/lab/LabWorkspace";
 import { createClient } from "@/lib/supabase/server";
 import { getCourse, getLab } from "@/lib/courses";
 import { canPlay, getSubscription } from "@/lib/entitlements";
@@ -31,14 +32,5 @@ export default async function LabPage({ params }: { params: Promise<{ course: st
     );
   }
 
-  return (
-    <div className="mx-auto max-w-3xl px-4 py-20 text-center">
-      <p className="font-mono text-xs text-slate-400">{course.vendor} · {lab.domain}</p>
-      <h1 className="mt-2 text-3xl font-semibold text-white">{lab.title}</h1>
-      <div className="mx-auto mt-8 max-w-md rounded-xl border border-slate-700 bg-slate-900/70 p-6">
-        <Wrench className="mx-auto h-6 w-6 text-cyan-300" />
-        <p className="mt-3 text-slate-300">The lab workspace (topology and CLI) is being built in the next step.</p>
-      </div>
-    </div>
-  );
+  return <LabWorkspace courseId={courseId} labId={labId} />;
 }
