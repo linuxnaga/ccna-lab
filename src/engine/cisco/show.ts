@@ -110,14 +110,21 @@ export function showIpRoute(state: CiscoState, dev: Device): string[] {
   const def = routes.find((r) => r.net === 0 && r.mask === 0);
   const out = [...CODES, def ? `Gateway of last resort is ${formatIp(def.nextHop!)} to network 0.0.0.0` : "Gateway of last resort is not set", ""];
 
+  // Group by classful major network, as IOS does.
   const groups = new Map<number, Route[]>();
   const top: Route[] = [];
   for (const r of routes) {
     const cm = classfulMask(r.net);
-    if (r.mask === 0 || (maskToPrefix(r.mask) ?? 0) <= (maskToPrefix(cm) ?? 0)) top.push(r);
+    if (r.mask === 0 || (maskToPrefix(r.mask) ?? 0) < (maskToPrefix(cm) ?? 0)) top.push(r);
     else {
       const major = (r.net & cm) >>> 0;
       groups.set(major, [...(groups.get(major) ?? []), r]);
+    }
+  }
+  for (const [major, rs] of groups) {
+    if (rs.length === 1 && rs[0].mask === classfulMask(major)) {
+      top.push(rs[0]);
+      groups.delete(major);
     }
   }
   const entries: { key: number; lines: string[] }[] = [];

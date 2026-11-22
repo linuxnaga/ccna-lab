@@ -113,10 +113,8 @@ const globalConfig: S[] = [
   }),
   spec("interface <iface:name>", "Select an interface to configure", (c, a) => {
     const name = String(a.name);
-    if (!c.dev.interfaces[name]) {
-      c.dev.interfaces[name] = { name, shutdown: false };
-      c.out.push(`%LINK-5-CHANGED: Interface ${name}, changed state to up`);
-    }
+    // SVIs ("interface vlan 10") are created on first use.
+    if (!c.dev.interfaces[name]) c.dev.interfaces[name] = { name, shutdown: false };
     setMode(c, "if", { iface: name });
   }),
   spec("vlan <int:id>", "Vlan commands", (c, a) => {

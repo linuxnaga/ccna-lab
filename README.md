@@ -30,13 +30,20 @@ src/
     auth/callback, signout    Supabase email-link and sign-out handlers
     dashboard/                Rank, XP bar, courses and lab list
     pricing/                  Free vs Pro, Stripe checkout
-    labs/[course]/[lab]/      Lab workspace (gated; engine arrives in step 2)
+    labs/[course]/[lab]/      Lab workspace (Pro and mission-order gated on the server)
     api/stripe/checkout       Starts a Stripe Checkout session
     api/stripe/portal         Opens the Stripe Billing Portal
     api/stripe/webhook        Mirrors Stripe subscriptions into Supabase
     api/progress              Records a completed lab and awards XP once
+  engine/
+    types.ts                  Vendor-neutral engine + lab contracts
+    cisco/                    Cisco IOS emulator (parser, modes, show, ping, OSPF)
+  labs/
+    ccna/*.ts                 Lab definitions: topology, start state, objectives, hints
+  components/lab/             Topology SVG, terminal, workspace, cheat sheet
   lib/
     courses.ts                Course + lab catalog (add new vendors here)
+    progression.ts            Mission unlock order and domain badges
     entitlements.ts           Free vs Pro checks
     ranks.ts                  Rank ladder (Cable Crimper -> CCNA Architect)
     supabase/                 Browser, server and service-role clients
@@ -73,9 +80,30 @@ npm run dev
 
 Import the GitHub repo in Vercel, add the same environment variables (with `NEXT_PUBLIC_SITE_URL` set to the production URL), and deploy.
 
+## Labs
+
+| # | Lab | Domain | What the student does |
+| --- | --- | --- | --- |
+| 1 | Branch Router Bring-up (free) | Network Fundamentals | Hostname, interface IP, `no shutdown`, ping, save config |
+| 2 | Sales VLAN Cannot Reach the Gateway | Switching & VLANs | Create VLAN 10, access ports, uplink, keep guest isolated, management SVI |
+| 3 | Two Sites, One Network | IP Routing | Address a router, bring up a /30 WAN, OSPF area 0 with router IDs, end-to-end ping |
+
+## Tests
+
+```bash
+npm test
+```
+
+Engine tests cover parsing, modes, error messages, VLANs, static routes and OSPF. Every lab is also played with a reference solution, which must complete all objectives without a CLI error.
+
+## Adding a lab
+
+Create `src/labs/<course>/<lab>.ts` exporting a `LabDefinition`, register it in `src/labs/index.ts`, add it to the catalog in `src/lib/courses.ts`, and add its reference solution to `src/labs/labs.test.ts`.
+
 ## Adding a new vendor course
 
 1. Add an entry to `COURSES` in `src/lib/courses.ts` with its labs.
-2. Provide a CLI engine for that vendor (the lab engine interface lands in step 2).
+2. Implement `VendorEngine` from `src/engine/types.ts` for that vendor's CLI (for example `src/engine/f5/`).
+3. Write lab definitions that use the new engine.
 
-Auth, billing and progress tracking need no changes.
+Auth, billing, progress, the HUD and the workspace UI need no changes.

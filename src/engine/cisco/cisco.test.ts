@@ -178,3 +178,14 @@ describe("running-config", () => {
     expect(ciscoEngine.prompt(s, "R1")).toBe("EDGE#");
   });
 });
+
+describe("show ip route layout", () => {
+  it("groups a /24 with its /32 local route like IOS", () => {
+    const s = run(fresh(), "R1", ["en", "conf t", "int g0/0", "ip add 192.168.10.1 255.255.255.0", "no shut", "end"]).state;
+    const out = run(s, "R1", ["show ip route"]).output;
+    const i = out.findIndex((l) => l.includes("192.168.10.0/24 is variably subnetted, 2 subnets, 2 masks"));
+    expect(i).toBeGreaterThan(0);
+    expect(out[i + 1]).toBe("C        192.168.10.0/24 is directly connected, GigabitEthernet0/0");
+    expect(out[i + 2]).toBe("L        192.168.10.1/32 is directly connected, GigabitEthernet0/0");
+  });
+});

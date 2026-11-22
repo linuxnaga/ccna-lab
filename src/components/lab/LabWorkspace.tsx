@@ -2,10 +2,13 @@
 
 import Link from "next/link";
 import { useEffect, useMemo, useReducer, useState } from "react";
-import { CheckSquare, Square, LifeBuoy, RotateCcw, Trophy, Flame, X } from "lucide-react";
+import { CheckSquare, Square, LifeBuoy, RotateCcw, Trophy, X, BookOpen } from "lucide-react";
 import { getLabDefinition } from "@/labs";
 import type { LabDefinition } from "@/engine/types";
 import { HINT_COST, getCourse } from "@/lib/courses";
+import { domainBadges } from "@/lib/progression";
+import { Hud } from "@/components/Hud";
+import { CheatSheet } from "./CheatSheet";
 import { TopologyView } from "./Topology";
 import { Terminal, type TermLine } from "./Terminal";
 
@@ -86,17 +89,23 @@ function reducer(lab: Lab) {
   };
 }
 
-export function LabWorkspace({ courseId, labId }: { courseId: string; labId: string }) {
-  const lab = getLabDefinition(courseId, labId);
-  if (!lab) return <p className="p-10 text-center text-slate-400">This lab is not available yet.</p>;
-  return <Workspace lab={lab} courseId={courseId} />;
+interface Player {
+  xp: number;
+  completed: string[];
 }
 
-function Workspace({ lab, courseId }: { lab: Lab; courseId: string }) {
+export function LabWorkspace({ courseId, labId, player }: { courseId: string; labId: string; player: Player }) {
+  const lab = getLabDefinition(courseId, labId);
+  if (!lab) return <p className="p-10 text-center text-slate-400">This lab is not available yet.</p>;
+  return <Workspace lab={lab} courseId={courseId} player={player} />;
+}
+
+function Workspace({ lab, courseId, player }: { lab: Lab; courseId: string; player: Player }) {
   const r = useMemo(() => reducer(lab), [lab]);
   const [s, dispatch] = useReducer(r, lab, init);
   const [award, setAward] = useState<{ awarded: number } | { error: string } | null>(null);
   const [briefingOpen, setBriefingOpen] = useState(true);
+  const [cheatOpen, setCheatOpen] = useState(false);
 
   const status = useMemo(
     () => Object.fromEntries(lab.topology.links.map((l) => [l.id, lab.engine.linkStatus(s.net, lab.topology, l)])),
@@ -123,6 +132,10 @@ function Workspace({ lab, courseId }: { lab: Lab; courseId: string }) {
   const idx = labs.findIndex((l) => l.id === lab.labId);
   const nextLab = labs[idx + 1];
   const baseXp = labs[idx]?.xp ?? 0;
+  const xp = player.xp + (award && "awarded" in award ? award.awarded : 0);
+  const completedSet = new Set(player.completed);
+  if (award && "awarded" in award) completedSet.add(lab.labId);
+  const badges = course ? domainBadges(course, completedSet) : [];
   const activeLabel = lab.topology.devices.find((d) => d.id === s.active)?.label ?? s.active;
 
   function reset() {
@@ -132,15 +145,16 @@ function Workspace({ lab, courseId }: { lab: Lab; courseId: string }) {
 
   return (
     <div className="mx-auto max-w-[1600px] px-4 py-4">
-      <div className="flex flex-wrap items-center justify-between gap-3">
+      <Hud xp={xp} streak={s.streak} badges={badges} compact />
+      <div className="mt-4 flex flex-wrap items-center justify-between gap-3">
         <div>
           <p className="font-mono text-xs text-slate-400">{course?.vendor} · {labs[idx]?.domain}</p>
           <h1 className="text-xl font-semibold text-white">{lab.title}</h1>
         </div>
         <div className="flex items-center gap-2">
-          <span className="flex items-center gap-1 rounded-md border border-slate-700 px-2.5 py-1.5 font-mono text-xs text-amber-300" title="Consecutive valid commands">
-            <Flame className="h-3.5 w-3.5" /> {s.streak}
-          </span>
+          <button onClick={() => setCheatOpen(true)} className="flex items-center gap-1.5 rounded-md border border-slate-700 px-3 py-1.5 text-sm text-slate-300 hover:border-cyan-400 hover:text-cyan-200">
+            <BookOpen className="h-4 w-4" /> Cheat Sheet
+          </button>
           <button onClick={reset} className="flex items-center gap-1.5 rounded-md border border-slate-700 px-3 py-1.5 text-sm text-slate-300 hover:border-rose-400 hover:text-rose-200">
             <RotateCcw className="h-4 w-4" /> Reset Lab
           </button>
@@ -200,6 +214,8 @@ function Workspace({ lab, courseId }: { lab: Lab; courseId: string }) {
           />
         </div>
       </div>
+
+      {cheatOpen && <CheatSheet onClose={() => setCheatOpen(false)} />}
 
       {s.showVictory && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/80 p-4 backdrop-blur-sm">
