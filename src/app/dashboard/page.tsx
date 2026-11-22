@@ -1,4 +1,5 @@
 import { redirect } from "next/navigation";
+import { connection } from "next/server";
 import { Clock } from "lucide-react";
 import { createClient } from "@/lib/supabase/server";
 import { COURSES } from "@/lib/courses";
@@ -11,6 +12,7 @@ import { paymentsMode } from "@/lib/billing";
 
 export default async function Dashboard({ searchParams }: { searchParams: Promise<{ checkout?: string; unlocked?: string }> }) {
   const { checkout, unlocked } = await searchParams;
+  await connection();
   const supabase = await createClient();
   const {
     data: { user },

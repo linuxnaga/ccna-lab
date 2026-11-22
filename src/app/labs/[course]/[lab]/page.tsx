@@ -1,4 +1,5 @@
 import Link from "next/link";
+import { connection } from "next/server";
 import { notFound, redirect } from "next/navigation";
 import { Lock } from "lucide-react";
 import { LabWorkspace } from "@/components/lab/LabWorkspace";
@@ -13,6 +14,7 @@ export default async function LabPage({ params }: { params: Promise<{ course: st
   const lab = getLab(courseId, labId);
   if (!course || !lab) notFound();
 
+  await connection();
   const supabase = await createClient();
   const {
     data: { user },

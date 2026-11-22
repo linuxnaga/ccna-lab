@@ -1,4 +1,5 @@
 import Link from "next/link";
+import { connection } from "next/server";
 import { redirect } from "next/navigation";
 import { createClient } from "@/lib/supabase/server";
 import { signIn, signUp } from "./actions";
@@ -7,6 +8,7 @@ type Search = { mode?: string; error?: string; notice?: string; next?: string };
 
 export default async function LoginPage({ searchParams }: { searchParams: Promise<Search> }) {
   const { mode, error, notice, next } = await searchParams;
+  await connection();
   const supabase = await createClient();
   const {
     data: { user },
