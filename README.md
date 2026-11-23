@@ -37,7 +37,7 @@ src/
     api/progress              Records a completed lab and awards XP once
   engine/
     types.ts                  Vendor-neutral engine + lab contracts
-    cisco/                    Cisco IOS emulator (parser, modes, show, ping, OSPF, STP, ACLs, NAT, DHCP)
+    cisco/                    Cisco IOS emulator (parser, modes, show, ping, OSPF, STP, ACLs, NAT, DHCP, HSRP, IPv6)
   labs/
     ccna/*.ts                 Lab definitions: topology, start state, objectives, hints
   components/lab/             Topology SVG, terminal, workspace, cheat sheet
@@ -98,12 +98,17 @@ Import the GitHub repo in Vercel, add the same environment variables (with `NEXT
 | 1 | Branch Router Bring-up (free) | Network Fundamentals | Hostname, interface IP, `no shutdown`, ping, save config |
 | 2 | Carve Up the /24 | Network Fundamentals | VLSM a /24 into /25, /26 and /27 subnets, address the router and PCs |
 | 3 | Sales VLAN Cannot Reach the Gateway | Switching & VLANs | Create VLAN 10, access ports, uplink, keep guest isolated, management SVI |
-| 4 | The Wrong Root Bridge | Switching & STP | Restore a VLAN and trunk, make the core the STP root, Rapid PVST+, PortFast and BPDU Guard |
-| 5 | Two Sites, One Network | IP Routing | Address a router, bring up a /30 WAN, OSPF area 0 with router IDs, end-to-end ping |
-| 6 | Backup Link Failover | IP Routing | Static and default routes with floating statics (AD 10) over a backup path |
-| 7 | Branch Internet Edge | IP Services | DHCP server with exclusions, PAT (NAT overload) and static NAT for a web server |
-| 8 | Lock Down the Server Farm | Security | Standard and extended ACLs, enable secret, console password, SSH-only VTY |
-| 9 | Ticket #4471: Floor 3 Is Down | Troubleshooting | Find five planted faults: gateway, VLAN, shutdown, mask and OSPF area mismatches |
+| 4 | Route Between the VLANs | Switching & VLANs | Router-on-a-stick: trunk the uplink, 802.1Q subinterfaces as VLAN gateways |
+| 5 | The Wrong Root Bridge | Switching & STP | Restore a VLAN and trunk, make the core the STP root, Rapid PVST+, PortFast and BPDU Guard |
+| 6 | Double the Uplink | Switching & STP | LACP EtherChannel with interface range, trunk the port-channel, STP sees one link |
+| 7 | Two Sites, One Network | IP Routing | Address a router, bring up a /30 WAN, OSPF area 0 with router IDs, end-to-end ping |
+| 8 | Backup Link Failover | IP Routing | Static and default routes with floating statics (AD 10) over a backup path |
+| 9 | IPv6 Comes to the Branch | IP Routing | IPv6 unicast routing, addressing, SLAAC with EUI-64, IPv6 static and default routes |
+| 10 | The Gateway That Never Dies | IP Routing | HSRP virtual gateway, priority and preempt, proven failover |
+| 11 | Branch Internet Edge | IP Services | DHCP server with exclusions, PAT (NAT overload) and static NAT for a web server |
+| 12 | Lock the Lobby Ports | Security | Port security with sticky and static MACs, err-disable a rogue laptop, black-hole VLAN |
+| 13 | Lock Down the Server Farm | Security | Standard and extended ACLs, enable secret, console password, SSH-only VTY |
+| 14 | Ticket #4471: Floor 3 Is Down | Troubleshooting | Find five planted faults: gateway, VLAN, shutdown, mask and OSPF area mismatches |
 
 Labs unlock in order. A lab a player already completed stays open even if a new lab is inserted before it.
 
@@ -113,7 +118,7 @@ Labs unlock in order. A lab a player already completed stays open even if a new 
 npm test
 ```
 
-Engine tests cover parsing, modes, error messages, VLANs, STP, static and floating static routes, OSPF, ACLs, NAT and DHCP. Every lab is also played with a reference solution, which must complete all objectives without a CLI error.
+Engine tests cover parsing, modes, error messages, VLANs, STP, EtherChannel, port security, router-on-a-stick, static and floating static routes, OSPF, HSRP, IPv6, ACLs, NAT and DHCP. Every lab is also played with a reference solution, which must complete all objectives without a CLI error.
 
 ## Adding a lab
 

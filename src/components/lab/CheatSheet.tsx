@@ -35,6 +35,20 @@ const SECTIONS: { title: string; rows: [string, string][] }[] = [
     ],
   },
   {
+    title: "Inter-VLAN, EtherChannel, port security",
+    rows: [
+      ["interface g0/0.10 / encapsulation dot1q 10", "Router-on-a-stick subinterface for VLAN 10"],
+      ["interface range fa0/23 - 24", "Configure several ports at once"],
+      ["channel-group 1 mode active", "Bundle with LACP (active/passive). 'on' = no negotiation"],
+      ["interface port-channel 1", "Configure the bundle; members inherit it"],
+      ["show etherchannel summary", "P = bundled, I = stand-alone, s = suspended"],
+      ["switchport port-security", "Turn on port security (access ports only)"],
+      ["switchport port-security mac-address sticky", "Learn the connected MAC into the config"],
+      ["switchport port-security violation shutdown", "err-disable the port on a violation"],
+      ["show port-security interface fa0/1", "Secure MACs, status and violations"],
+    ],
+  },
+  {
     title: "Spanning tree",
     rows: [
       ["spanning-tree mode rapid-pvst", "Use Rapid PVST+ (faster convergence)"],
@@ -54,6 +68,19 @@ const SECTIONS: { title: string; rows: [string, string][] }[] = [
       ["network 10.0.0.0 0.0.0.3 area 0", "Enable OSPF on matching interfaces (wildcard mask)"],
       ["ip route 0.0.0.0 0.0.0.0 10.0.0.1", "Default route (gateway of last resort)"],
       ["ip route 0.0.0.0 0.0.0.0 10.0.9.1 10", "Floating static: AD 10 backs up the AD 1 route"],
+    ],
+  },
+  {
+    title: "HSRP and IPv6",
+    rows: [
+      ["standby 1 ip 192.168.1.1", "Join HSRP group 1 with a virtual gateway IP"],
+      ["standby 1 priority 110 / standby 1 preempt", "Win the election and take it back after a failure"],
+      ["show standby brief", "Active, standby and virtual IP"],
+      ["ipv6 unicast-routing", "Let the router forward IPv6 and send RAs"],
+      ["ipv6 address 2001:db8:1::1/64", "IPv6 address (add eui-64 to build it from the MAC)"],
+      ["ipv6 route ::/0 2001:db8:12::1", "IPv6 default route"],
+      ["show ipv6 interface brief  /  show ipv6 route", "IPv6 addresses and routing table"],
+      ["ipv6config autoconfig", "PC: SLAAC address from the router's prefix"],
     ],
   },
   {

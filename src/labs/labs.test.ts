@@ -70,6 +70,31 @@ const SOLUTIONS: Record<string, [string, string[]][]> = {
     ["R1", ["en", "show ip int br", "conf t", "int g0/0", "no shut", "int g0/1", "ip add 10.0.0.1 255.255.255.252", "end"]],
     ["R2", ["en", "show ip protocols", "conf t", "router ospf 1", "no network 10.0.0.0 0.0.0.3 area 1", "network 10.0.0.0 0.0.0.3 area 0", "end"]],
   ],
+  "ccna/inter-vlan": [
+    ["SW1", ["en", "conf t", "int g0/1", "sw mode trunk", "end"]],
+    ["R1", ["en", "conf t", "int g0/0", "no shut", "int g0/0.10", "encapsulation dot1q 10", "ip add 192.168.10.1 255.255.255.0", "int g0/0.20", "encap dot1q 20", "ip add 192.168.20.1 255.255.255.0", "end"]],
+  ],
+  "ccna/etherchannel": [
+    ["SW1", ["en", "conf t", "interface range fa0/23 - 24", "channel-group 1 mode active", "exit", "interface port-channel 1", "switchport mode trunk", "end"]],
+    ["SW2", ["en", "conf t", "int range fa0/23 - 24", "channel-group 1 mode passive", "exit", "int po1", "sw mode trunk", "end", "show etherchannel summary"]],
+  ],
+  "ccna/ipv6-routing": [
+    ["R2", ["en", "conf t", "ipv6 unicast-routing", "int g0/0", "ipv6 address 2001:db8:acad:2::1/64", "no shut", "int g0/1", "ipv6 address 2001:db8:acad:12::2/64", "no shut", "exit", "ipv6 route ::/0 2001:db8:acad:12::1", "end"]],
+    ["PC2", ["ipv6config autoconfig"]],
+    ["R1", ["en", "conf t", "ipv6 route 2001:db8:acad:2::/64 2001:db8:acad:12::2", "end"]],
+  ],
+  "ccna/hsrp": [
+    ["R1", ["en", "conf t", "int g0/0", "standby 1 ip 192.168.50.1", "standby 1 priority 110", "standby 1 preempt", "end"]],
+    ["R2", ["en", "conf t", "int g0/0", "standby 1 ip 192.168.50.1", "end", "show standby brief"]],
+  ],
+  "ccna/port-security": [
+    ["SW1", [
+      "en", "conf t",
+      "interface range fa0/1 - 2", "switchport port-security", "switchport port-security maximum 1", "switchport port-security mac-address sticky", "exit",
+      "int fa0/3", "switchport port-security", "switchport port-security mac-address 0060.3E1A.22B4", "switchport port-security violation shutdown", "exit",
+      "interface range fa0/4 - 24", "switchport mode access", "switchport access vlan 999", "shutdown", "end",
+    ]],
+  ],
   "ccna/static-ospf": [
     ["R2", ["en", "conf t", "int g0/0", "ip add 192.168.20.1 255.255.255.0", "no shut", "int g0/1", "ip add 10.0.0.2 255.255.255.252", "no shut", "router ospf 1", "router-id 2.2.2.2", "network 10.0.0.0 0.0.0.3 area 0", "network 192.168.20.0 0.0.0.255 area 0", "end"]],
     ["R1", ["en", "conf t", "int g0/1", "no shut", "router ospf 1", "router-id 1.1.1.1", "net 10.0.0.0 0.0.0.3 area 0", "net 192.168.10.0 0.0.0.255 area 0", "end"]],

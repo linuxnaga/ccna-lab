@@ -5,8 +5,9 @@
 import type { Device } from "./model";
 import { IFACE_TYPES } from "./model";
 import { parseIp } from "./ip";
+import { parseIp6, parsePrefix6 } from "./ip6";
 
-export type ArgType = "ip" | "int" | "iface" | "word" | "line";
+export type ArgType = "ip" | "ipv6" | "ipv6p" | "int" | "iface" | "word" | "line";
 
 type Elem = { kw: string } | { arg: ArgType; name: string };
 
@@ -45,7 +46,7 @@ export function tokenize(line: string): Token[] {
 export function matchIface(tokens: Token[], i: number, dev: Device): [string, number] | null {
   const t = tokens[i]?.text.toLowerCase();
   if (!t) return null;
-  const m = /^([a-z]+)([\d/]*)$/.exec(t);
+  const m = /^([a-z-]+)([\d/.]*)$/.exec(t);
   if (!m) return null;
   const [, typePart, numPart] = m;
   const types = IFACE_TYPES.filter((ty) => ty.full.toLowerCase().startsWith(typePart));
@@ -55,7 +56,7 @@ export function matchIface(tokens: Token[], i: number, dev: Device): [string, nu
   let consumed = 1;
   if (!num) {
     const next = tokens[i + 1]?.text;
-    if (!next || !/^[\d/]+$/.test(next)) return null;
+    if (!next || !/^[\d/.]+$/.test(next)) return null;
     num = next;
     consumed = 2;
   }
@@ -63,6 +64,15 @@ export function matchIface(tokens: Token[], i: number, dev: Device): [string, nu
   if (dev.interfaces[name]) return [name, consumed];
   // SVIs are created on demand on switches.
   if (type.full === "Vlan" && dev.kind === "switch" && /^\d+$/.test(num) && +num >= 1 && +num <= 4094) {
+    return [name, consumed];
+  }
+  // Router subinterfaces ("g0/0.10") are created on demand on an existing physical port.
+  const sub = /^(\d+\/\d+)\.(\d+)$/.exec(num);
+  if (sub && dev.kind === "router" && type.full === "GigabitEthernet" && dev.interfaces[type.full + sub[1]] && +sub[2] >= 1 && +sub[2] <= 4294967295) {
+    return [name, consumed];
+  }
+  // Port-channels are created by "channel-group", but "interface port-channel N" may also create one.
+  if (type.full === "Port-channel" && dev.kind === "switch" && /^\d+$/.test(num) && +num >= 1 && +num <= 48) {
     return [name, consumed];
   }
   if (type.full === "Loopback" && dev.kind === "router" && /^\d+$/.test(num) && +num <= 2147483647) {
@@ -77,6 +87,10 @@ function matchArg(type: ArgType, tokens: Token[], i: number, dev: Device): [stri
   switch (type) {
     case "ip":
       return parseIp(t) !== null ? [t, 1] : null;
+    case "ipv6":
+      return parseIp6(t) !== null ? [t, 1] : null;
+    case "ipv6p":
+      return parsePrefix6(t) !== null ? [t, 1] : null;
     case "int":
       return /^\d+$/.test(t) ? [Number(t), 1] : null;
     case "word":
@@ -197,7 +211,7 @@ export function nextOptions<C>(specs: Spec<C>[], line: string, dev: Device): { w
     if ("kw" in el) {
       if (el.kw.startsWith(partial)) out.set(el.kw, e === s.elems.length - 1 || !out.has(el.kw) ? s.help : out.get(el.kw)!);
     } else if (!partial) {
-      const label = el.arg === "ip" ? "A.B.C.D" : el.arg === "int" ? "<number>" : el.arg === "iface" ? "<interface>" : el.arg === "line" ? "LINE" : "WORD";
+      const label = el.arg === "ip" ? "A.B.C.D" : el.arg === "ipv6" ? "X:X:X:X::X" : el.arg === "ipv6p" ? "X:X:X:X::X/<0-128>" : el.arg === "int" ? "<number>" : el.arg === "iface" ? "<interface>" : el.arg === "line" ? "LINE" : "WORD";
       out.set(label, el.name);
     }
   }
@@ -213,7 +227,7 @@ export function completeLine<C>(specs: Spec<C>[], line: string, dev: Device): st
     // Interface type completion: "int g" -> "int GigabitEthernet"
     const last = tokenize(line).pop()!;
     const types = IFACE_TYPES.filter((t) => t.full.toLowerCase().startsWith(last.text.toLowerCase()));
-    if (opts.length === 0 && types.length === 1 && /^[a-z]+$/i.test(last.text)) {
+    if (opts.length === 0 && types.length === 1 && /^[a-z-]+$/i.test(last.text)) {
       return line.slice(0, last.col) + types[0].full;
     }
     return line;

@@ -8,6 +8,11 @@ import { floatingStaticLab } from "./ccna/floating-static";
 import { dhcpNatLab } from "./ccna/dhcp-nat";
 import { aclHardeningLab } from "./ccna/acl-hardening";
 import { troubleshootLab } from "./ccna/troubleshoot";
+import { interVlanLab } from "./ccna/inter-vlan";
+import { etherchannelLab } from "./ccna/etherchannel";
+import { ipv6RoutingLab } from "./ccna/ipv6-routing";
+import { hsrpLab } from "./ccna/hsrp";
+import { portSecurityLab } from "./ccna/port-security";
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type AnyLab = LabDefinition<any>;
@@ -17,10 +22,15 @@ export const LABS: Record<string, AnyLab> = {
   "ccna/router-interface": routerInterfaceLab,
   "ccna/subnet-vlsm": subnetVlsmLab,
   "ccna/vlan-access": vlanAccessLab,
+  "ccna/inter-vlan": interVlanLab,
   "ccna/stp-root": stpRootLab,
+  "ccna/etherchannel": etherchannelLab,
   "ccna/static-ospf": staticOspfLab,
   "ccna/floating-static": floatingStaticLab,
+  "ccna/ipv6-routing": ipv6RoutingLab,
+  "ccna/hsrp": hsrpLab,
   "ccna/dhcp-nat": dhcpNatLab,
+  "ccna/port-security": portSecurityLab,
   "ccna/acl-hardening": aclHardeningLab,
   "ccna/troubleshoot": troubleshootLab,
 };

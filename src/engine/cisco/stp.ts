@@ -4,7 +4,7 @@
  * root ports, designated ports and alternate (blocking) ports.
  */
 import type { CiscoState, Device } from "./model";
-import { findLink, physicalUp } from "./network";
+import { findLink, logicalPort, physicalUp } from "./network";
 
 const ifaceOrder = (a: string, b: string) => a.localeCompare(b, undefined, { numeric: true });
 
@@ -36,12 +36,18 @@ export interface StpVlan {
 
 const cmpBid = (a: BridgeId, b: BridgeId) => a.priority - b.priority || a.mac.localeCompare(b.mac);
 
-export function portCost(iface: string): number {
+export function portCost(iface: string, dev?: Device): number {
+  if (iface.startsWith("Port-channel")) {
+    const id = Number(iface.slice("Port-channel".length));
+    const gig = dev && Object.values(dev.interfaces).some((m) => m.channelGroup?.id === id && m.name.startsWith("Gigabit"));
+    return gig ? 3 : 12;
+  }
   return iface.startsWith("GigabitEthernet") ? 4 : 19;
 }
 
-/** Port number as IOS shows it in "Prio.Nbr": Fa0/n -> n, Gi0/n -> 24+n. */
+/** Port number as IOS shows it in "Prio.Nbr": Fa0/n -> n, Gi0/n -> 24+n, Po n -> 64+n. */
 export function portNumber(iface: string): number {
+  if (iface.startsWith("Port-channel")) return 64 + Number(iface.slice("Port-channel".length));
   const n = Number(iface.split("/").pop());
   return iface.startsWith("GigabitEthernet") ? 24 + n : n;
 }
@@ -69,22 +75,34 @@ interface Edge {
   peerIface: string;
 }
 
-/** Switch-to-switch segments that carry the VLAN on both ends. */
+/** Physical ports that are up, mapped to the logical port STP sees (bundled members become their port-channel). */
+function logicalUpPorts(state: CiscoState, dev: Device): Map<string, string> {
+  const out = new Map<string, string>();
+  for (const iface of Object.keys(dev.interfaces)) {
+    if (iface.startsWith("Port-channel") || !dev.interfaces[iface].switchport || !physicalUp(state, dev.id, iface)) continue;
+    out.set(iface, logicalPort(state, dev.id, iface));
+  }
+  return out;
+}
+
+/** Switch-to-switch segments that carry the VLAN on both ends (one per port-channel). */
 function vlanEdges(state: CiscoState, vlan: number): Edge[] {
-  const edges: Edge[] = [];
+  const edges = new Map<string, Edge>();
   for (const dev of Object.values(state.devices)) {
     if (dev.kind !== "switch") continue;
-    for (const iface of Object.keys(dev.interfaces)) {
-      if (!carries(dev, iface, vlan) || !physicalUp(state, dev.id, iface)) continue;
-      const l = findLink(state, dev.id, iface);
+    for (const [phys, iface] of logicalUpPorts(state, dev)) {
+      if (!carries(dev, iface, vlan)) continue;
+      const l = findLink(state, dev.id, phys);
       const peer = l && state.devices[l.peer.device];
-      if (!l || !peer || peer.kind !== "switch" || !carries(peer, l.peer.port, vlan)) continue;
-      const bothTrunk = dev.interfaces[iface].switchport!.mode === "trunk" && peer.interfaces[l.peer.port].switchport!.mode === "trunk";
-      if (!bothTrunk && untagged(dev, iface) !== untagged(peer, l.peer.port)) continue;
-      edges.push({ dev: dev.id, iface, peer: peer.id, peerIface: l.peer.port });
+      if (!l || !peer || peer.kind !== "switch") continue;
+      const peerIface = logicalPort(state, peer.id, l.peer.port);
+      if (!carries(peer, peerIface, vlan)) continue;
+      const bothTrunk = dev.interfaces[iface].switchport!.mode === "trunk" && peer.interfaces[peerIface].switchport!.mode === "trunk";
+      if (!bothTrunk && untagged(dev, iface) !== untagged(peer, peerIface)) continue;
+      edges.set(`${dev.id}|${iface}`, { dev: dev.id, iface, peer: peer.id, peerIface });
     }
   }
-  return edges;
+  return [...edges.values()];
 }
 
 /** Spanning tree for every switch in one VLAN. */
@@ -118,7 +136,7 @@ export function spanningTreeAll(state: CiscoState, vlan: number): Record<string,
     queue.sort((a, b) => dist.get(a)! - dist.get(b)!);
     const x = queue.shift()!;
     for (const e of adj.get(x) ?? []) {
-      const c = dist.get(x)! + portCost(e.peerIface);
+      const c = dist.get(x)! + portCost(e.peerIface, state.devices[e.peer]);
       if (c < (dist.get(e.peer) ?? Infinity)) { dist.set(e.peer, c); queue.push(e.peer); }
     }
   }
@@ -129,7 +147,7 @@ export function spanningTreeAll(state: CiscoState, vlan: number): Record<string,
     if (roots.has(d.id)) continue;
     let best: { e: Edge; key: [number, BridgeId, number, number] } | null = null;
     for (const e of adj.get(d.id) ?? []) {
-      const key: [number, BridgeId, number, number] = [dist.get(e.peer)! + portCost(e.iface), bid(e.peer), portNumber(e.peerIface), portNumber(e.iface)];
+      const key: [number, BridgeId, number, number] = [dist.get(e.peer)! + portCost(e.iface, d), bid(e.peer), portNumber(e.peerIface), portNumber(e.iface)];
       if (
         !best ||
         key[0] < best.key[0] ||
@@ -143,11 +161,12 @@ export function spanningTreeAll(state: CiscoState, vlan: number): Record<string,
   for (const d of switches) {
     const ports: StpPort[] = [];
     const edgeByIface = new Map((adj.get(d.id) ?? []).map((e) => [e.iface, e]));
-    for (const iface of Object.keys(d.interfaces).sort(ifaceOrder)) {
-      if (!carries(d, iface, vlan) || !physicalUp(state, d.id, iface)) continue;
+    const logical = [...new Set(logicalUpPorts(state, d).values())].sort(ifaceOrder);
+    for (const iface of logical) {
+      if (!carries(d, iface, vlan)) continue;
       const e = edgeByIface.get(iface);
       const sp = d.interfaces[iface].switchport!;
-      const base = { iface, cost: portCost(iface), portId: portNumber(iface), edge: !!sp.portfast };
+      const base = { iface, cost: portCost(iface, d), portId: portNumber(iface), edge: !!sp.portfast };
       if (!e) {
         // Edge toward a host or router (or a switch that does not carry the VLAN).
         ports.push({ ...base, role: "Desg", state: "FWD" });
@@ -206,10 +225,12 @@ export function portBlocked(state: CiscoState, devId: string, iface: string): bo
   if (dev?.kind !== "switch" || !dev.interfaces[iface]?.switchport) return false;
   const users = userVlans(state);
   const candidates = Object.keys(dev.vlans).map(Number);
-  const relevant = candidates.filter((v) => users.has(v));
+  const logical = logicalPort(state, devId, iface);
+  const carried = candidates.filter((v) => spanningTree(state, devId, v)?.ports.some((x) => x.iface === logical));
+  const relevant = carried.filter((v) => users.has(v));
   let any = false;
-  for (const v of relevant.length ? relevant : candidates) {
-    const p = spanningTree(state, devId, v)?.ports.find((x) => x.iface === iface);
+  for (const v of relevant.length ? relevant : carried) {
+    const p = spanningTree(state, devId, v)?.ports.find((x) => x.iface === logical);
     if (!p) continue;
     if (p.state === "FWD") return false;
     any = true;

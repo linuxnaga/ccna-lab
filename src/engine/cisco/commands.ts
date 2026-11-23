@@ -1,12 +1,20 @@
 import type { AclEntry, AddrMatch, CiscoState, Device, Mode } from "./model";
 import { formatIp, isHostAddress, maskToPrefix, network, parseIp, sameSubnet } from "./ip";
+import { eui64, formatIp6, isLinkLocal, network6, parseIp6, parsePrefix6, sameSubnet6 } from "./ip6";
 import { spec, type Args, type Spec } from "./parser";
-import { dhcpOffer, ping, type PingResult } from "./network";
+import { dhcpOffer, ping, ping6, slaacOffer, type PingResult } from "./network";
 import { ANY, aclKind } from "./acl";
 import { spanningTreeAll } from "./stp";
 import {
   showAccessLists,
   showDhcpBinding,
+  showEtherchannelSummary,
+  showIpv6IntBrief,
+  showIpv6Route,
+  showMacAddressTable,
+  showPortSecurity,
+  showPortSecurityInterface,
+  showStandbyBrief,
   showInterfacesStatus,
   showInterfacesTrunk,
   showIpIntBrief,
@@ -46,6 +54,9 @@ const isSwitch = (d: Device) => d.kind === "switch";
 const curIf = (ctx: Ctx) => ctx.dev.interfaces[ctx.dev.ctx.iface!];
 const onSwitchPort = (d: Device) => !!d.ctx.iface && !!d.interfaces[d.ctx.iface]?.switchport;
 const onL3If = (d: Device) => !!d.ctx.iface && !d.interfaces[d.ctx.iface]?.switchport;
+const onSubIf = (d: Device) => isRouter(d) && !!d.ctx.iface && /\.\d+$/.test(d.ctx.iface);
+const onAccessCapable = (d: Device) => onSwitchPort(d) && !d.ctx.iface!.startsWith("Port-channel");
+const MAC_RE = /^[0-9a-f]{4}\.[0-9a-f]{4}\.[0-9a-f]{4}$/i;
 
 function setMode(ctx: Ctx, mode: Mode, extra: Device["ctx"] = {}) {
   ctx.dev.mode = mode;
@@ -89,7 +100,21 @@ function doPing(ctx: Ctx, dst: string) {
   );
 }
 
+function doPing6(ctx: Ctx, dst: string) {
+  const target = parseIp6(dst)!;
+  const r = ping6(ctx.state, ctx.dev.id, target);
+  const marks = r.ok ? "!!!!!" : r.unreachable ? "UUUUU" : ".....";
+  const ok = r.ok ? 5 : 0;
+  ctx.out.push(
+    "Type escape sequence to abort.",
+    `Sending 5, 100-byte ICMP Echos to ${formatIp6(target)}, timeout is 2 seconds:`,
+    marks,
+    `Success rate is ${ok * 20} percent (${ok}/5)${r.ok ? ", round-trip min/avg/max = 0/1/4 ms" : ""}`,
+  );
+}
+
 const userExec: S[] = [
+  spec("ping <ipv6:dst>", "Send echo messages", (c, a) => doPing6(c, String(a.dst))),
   spec("enable", "Turn on privileged commands", (c) => setMode(c, "priv")),
   spec("ping <ip:dst>", "Send echo messages", (c, a) => doPing(c, String(a.dst))),
   spec("show ip interface brief", "Brief summary of IP status and configuration", (c) => c.out.push(...showIpIntBrief(c.state, c.dev))),
@@ -104,9 +129,18 @@ const privExec: S[] = [
     setMode(c, "config");
   }),
   spec("disable", "Turn off privileged commands", (c) => setMode(c, "user")),
+  spec("ping <ipv6:dst>", "Send echo messages", (c, a) => doPing6(c, String(a.dst))),
+  spec("show ipv6 interface brief", "Brief summary of IPv6 status and configuration", (c) => c.out.push(...showIpv6IntBrief(c.state, c.dev))),
+  spec("show ipv6 route", "Show IPv6 route table entries", (c) => c.out.push(...showIpv6Route(c.state, c.dev)), isRouter),
+  spec("show standby brief", "Brief output", (c) => c.out.push(...showStandbyBrief(c.state, c.dev)), isRouter),
+  spec("show standby", "HSRP information", (c) => c.out.push(...showStandbyBrief(c.state, c.dev)), isRouter),
+  spec("show etherchannel summary", "One-line summary per channel-group", (c) => c.out.push(...showEtherchannelSummary(c.state, c.dev)), isSwitch),
+  spec("show port-security", "Show secure port information", (c) => c.out.push(...showPortSecurity(c.state, c.dev)), isSwitch),
+  spec("show port-security interface <iface:name>", "Show secure port information", (c, a) => c.out.push(...showPortSecurityInterface(c.state, c.dev, String(a.name))), isSwitch),
+  spec("show mac address-table", "MAC forwarding table", (c) => c.out.push(...showMacAddressTable(c.state, c.dev)), isSwitch),
   spec("enable", "Turn on privileged commands", () => {}),
   spec("ping <ip:dst>", "Send echo messages", (c, a) => doPing(c, String(a.dst))),
-  spec("show running-config", "Current operating configuration", (c) => c.out.push(...showRunningConfig(c.dev))),
+  spec("show running-config", "Current operating configuration", (c) => c.out.push(...showRunningConfig(c.dev, c.state))),
   spec("show ip interface brief", "Brief summary of IP status and configuration", (c) => c.out.push(...showIpIntBrief(c.state, c.dev))),
   spec("show ip route", "IP routing table", (c) => c.out.push(...showIpRoute(c.state, c.dev))),
   spec("show ip ospf neighbor", "Neighbor list", (c) => c.out.push(...showOspfNeighbor(c.state, c.dev)), isRouter),
@@ -149,6 +183,40 @@ const privExec: S[] = [
 ];
 
 /* ---------------------------- CONFIG ---------------------------- */
+
+const shortIf = (n: string) => n.replace("FastEthernet", "Fa").replace("GigabitEthernet", "Gi");
+
+function defaultSecurity() {
+  return { enabled: false, max: 1, sticky: false, macs: [] as string[], violation: "shutdown" as const };
+}
+
+function security(c: Ctx) {
+  const sp = curIf(c).switchport!;
+  sp.portSecurity ??= defaultSecurity();
+  return sp.portSecurity;
+}
+
+function hsrp(c: Ctx, g: number) {
+  const i = curIf(c);
+  i.hsrp ??= {};
+  i.hsrp[g] ??= { priority: 100, preempt: false };
+  return i.hsrp[g];
+}
+
+function addV6(c: Ctx, text: string, eui: boolean) {
+  const { addr, prefix } = parsePrefix6(text)!;
+  if (eui && prefix > 64) return fail(c, "% Prefix length must be 64 or less for an EUI-64 address");
+  const full = eui ? network6(addr, 64) | eui64(c.dev.mac) : addr;
+  if (isLinkLocal(full)) return fail(c, "% Use 'ipv6 address <addr> link-local' for link-local addresses");
+  for (const other of Object.values(c.dev.interfaces)) {
+    if (other.name === c.dev.ctx.iface) continue;
+    for (const o of other.ipv6 ?? []) {
+      if (sameSubnet6(full, o.addr, Math.min(prefix, o.prefix))) return fail(c, `% ${formatIp6(network6(full, prefix))}/${prefix} overlaps with ${other.name}`);
+    }
+  }
+  const i = curIf(c);
+  i.ipv6 = [...(i.ipv6 ?? []).filter((x) => network6(x.addr, x.prefix) !== network6(full, prefix)), { addr: full, prefix, ...(eui ? { eui64: true } : {}) }];
+}
 
 function addStatic(c: Ctx, a: Args) {
   const net = ip(a.net);
@@ -263,9 +331,26 @@ const globalConfig: S[] = [
   }),
   spec("interface <iface:name>", "Select an interface to configure", (c, a) => {
     const name = String(a.name);
-    // SVIs ("interface vlan 10") are created on first use.
-    if (!c.dev.interfaces[name]) c.dev.interfaces[name] = { name, shutdown: false };
+    // SVIs ("interface vlan 10"), loopbacks, subinterfaces and port-channels are created on first use.
+    if (!c.dev.interfaces[name]) {
+      c.dev.interfaces[name] = name.startsWith("Port-channel")
+        ? { name, shutdown: false, switchport: { mode: "dynamic", accessVlan: 1 } }
+        : { name, shutdown: false };
+    }
     setMode(c, "if", { iface: name });
+  }),
+  spec("interface range <iface:first> - <int:last>", "interface range command", (c, a) => {
+    const first = String(a.first);
+    const m = /^(.*\/)(\d+)$/.exec(first);
+    const last = Number(a.last);
+    if (!m || last < Number(m[2])) return fail(c, "% Invalid input detected at '^' marker.");
+    const names: string[] = [];
+    for (let n = Number(m[2]); n <= last; n++) {
+      const name = m[1] + n;
+      if (!c.dev.interfaces[name]) return fail(c, `% Interface ${name} does not exist`, "% Command rejected: Bad interface range");
+      names.push(name);
+    }
+    setMode(c, "if", { iface: names[0], range: names });
   }),
   spec("vlan <int:id>", "Vlan commands", (c, a) => {
     if (ensureVlan(c, Number(a.id))) setMode(c, "vlan", { vlan: Number(a.id) });
@@ -416,6 +501,25 @@ const globalConfig: S[] = [
     setMode(c, "line", { line: "vty" });
   }),
   spec("ip routing", "Enable IP routing", () => {}),
+  spec("ipv6 unicast-routing", "Enable unicast routing", (c) => {
+    c.dev.ipv6Routing = true;
+  }, isRouter),
+  spec("no ipv6 unicast-routing", "Enable unicast routing", (c) => {
+    c.dev.ipv6Routing = false;
+  }, isRouter),
+  spec("ipv6 route <ipv6p:pfx> <ipv6:nh>", "Configure static routes", (c, a) => {
+    const { addr, prefix } = parsePrefix6(String(a.pfx))!;
+    const nh = parseIp6(String(a.nh))!;
+    if (isLinkLocal(nh)) return fail(c, "% Interface has to be specified for a link-local nexthop");
+    const net = network6(addr, prefix);
+    if (!c.dev.staticRoutes6.some((r) => r.net === net && r.prefix === prefix && r.nextHop === nh)) c.dev.staticRoutes6.push({ net, prefix, nextHop: nh });
+  }, isRouter),
+  spec("no ipv6 route <ipv6p:pfx> <ipv6:nh>", "Configure static routes", (c, a) => {
+    const { addr, prefix } = parsePrefix6(String(a.pfx))!;
+    const nh = parseIp6(String(a.nh))!;
+    const net = network6(addr, prefix);
+    c.dev.staticRoutes6 = c.dev.staticRoutes6.filter((r) => !(r.net === net && r.prefix === prefix && r.nextHop === nh));
+  }, isRouter),
   spec("no ip domain-lookup", "Disable IP Domain Name System hostname translation", () => {}),
   spec("ip domain-lookup", "Enable IP Domain Name System hostname translation", () => {}),
   spec("exit", "Exit from configure mode", (c) => setMode(c, "priv")),
@@ -426,6 +530,9 @@ const ifConfig: S[] = [
   spec("ip address <ip:addr> <ip:mask>", "Set the IP address of an interface", (c, a) => {
     const addr = ip(a.addr);
     const mask = ip(a.mask);
+    if (onSubIf(c.dev) && curIf(c).dot1q === undefined) {
+      return fail(c, "% Configuring IP routing on a LAN subinterface is only allowed if that", "subinterface is already configured as part of an IEEE 802.10, IEEE 802.1Q,", "or ISL vLAN.");
+    }
     if (maskToPrefix(mask) === null || !isHostAddress(addr, mask)) {
       return fail(c, `Bad mask /${maskToPrefix(mask) ?? "0x" + mask.toString(16).toUpperCase()} for address ${formatIp(addr)}`);
     }
@@ -474,6 +581,96 @@ const ifConfig: S[] = [
   spec("no switchport access vlan", "Set VLAN when interface is in access mode", (c) => {
     curIf(c).switchport!.accessVlan = 1;
   }, onSwitchPort),
+  spec("encapsulation dot1q <int:vlan>", "IEEE 802.1Q Virtual LAN", (c, a) => {
+    const v = Number(a.vlan);
+    if (v < 1 || v > 4094) return fail(c, "% Invalid input detected at '^' marker.");
+    const parent = c.dev.ctx.iface!.replace(/\.\d+$/, "");
+    const clash = Object.values(c.dev.interfaces).find((i) => i.name !== c.dev.ctx.iface && i.dot1q === v && i.name.startsWith(parent + "."));
+    if (clash) return fail(c, `Configuration of multiple subinterfaces of the same main`, `interface with the same VID (${v}) is not permitted.`, `This VID is already configured on ${clash.name}.`);
+    curIf(c).dot1q = v;
+  }, onSubIf),
+  ...(["active", "passive", "on", "desirable", "auto"] as const).map((mode) =>
+    spec<Ctx>(`channel-group <int:id> mode ${mode}`, "Etherchannel / port bundling configuration", (c, a) => {
+      const id = Number(a.id);
+      if (id < 1 || id > 48) return fail(c, "% Invalid input detected at '^' marker.");
+      const me = curIf(c);
+      if (me.channelGroup && me.channelGroup.id === id && me.channelGroup.mode !== mode) {
+        const proto = (m: string) => (m === "active" || m === "passive" ? "LACP" : m === "on" ? "none" : "PAgP");
+        if (proto(me.channelGroup.mode) !== proto(mode)) return fail(c, `Command rejected (Channel protocol mismatch for interface ${shortIf(me.name)} in group ${id}): the interface can not be added to the channel group`);
+      }
+      const po = `Port-channel${id}`;
+      if (!c.dev.interfaces[po]) {
+        c.out.push(`Creating a port-channel interface Port-channel ${id}`);
+        c.dev.interfaces[po] = { name: po, shutdown: false, switchport: { mode: me.switchport!.mode, accessVlan: me.switchport!.accessVlan } };
+      }
+      me.channelGroup = { id, mode };
+    }, onAccessCapable),
+  ),
+  spec("no channel-group", "Etherchannel / port bundling configuration", (c) => {
+    delete curIf(c).channelGroup;
+  }, onAccessCapable),
+  spec("switchport port-security", "Security related command", (c) => {
+    const sp = curIf(c).switchport!;
+    if (sp.mode !== "access") return fail(c, `Command rejected: ${c.dev.ctx.iface} is a dynamic port.`);
+    sp.portSecurity = { ...(sp.portSecurity ?? defaultSecurity()), enabled: true };
+  }, onAccessCapable),
+  spec("no switchport port-security", "Security related command", (c) => {
+    const sp = curIf(c).switchport!;
+    if (sp.portSecurity) sp.portSecurity.enabled = false;
+  }, onAccessCapable),
+  spec("switchport port-security maximum <int:n>", "Max secure addresses", (c, a) => {
+    const n = Number(a.n);
+    if (n < 1 || n > 132) return fail(c, "% Invalid input detected at '^' marker.");
+    security(c).max = n;
+  }, onAccessCapable),
+  spec("switchport port-security mac-address sticky", "Configure dynamic secure addresses as sticky", (c) => {
+    security(c).sticky = true;
+  }, onAccessCapable),
+  spec("no switchport port-security mac-address sticky", "Configure dynamic secure addresses as sticky", (c) => {
+    security(c).sticky = false;
+  }, onAccessCapable),
+  spec("switchport port-security mac-address <word:mac>", "Secure mac address", (c, a) => {
+    const mac = String(a.mac);
+    if (!MAC_RE.test(mac)) return fail(c, "% Invalid input detected at '^' marker.", "% Use the format HHHH.HHHH.HHHH, e.g. 0060.3E1A.22B4");
+    const ps = security(c);
+    if (ps.macs.length >= ps.max) return fail(c, `Total secure mac-addresses on interface ${c.dev.ctx.iface} has reached maximum limit.`);
+    const norm = mac.toUpperCase();
+    if (!ps.macs.includes(norm)) ps.macs.push(norm);
+  }, onAccessCapable),
+  ...(["shutdown", "restrict", "protect"] as const).map((v) =>
+    spec<Ctx>(`switchport port-security violation ${v}`, "Security violation mode", (c) => {
+      security(c).violation = v;
+    }, onAccessCapable),
+  ),
+  spec("standby <int:g> ip <ip:vip>", "HSRP interface configuration commands", (c, a) => {
+    const i = curIf(c);
+    const vip = ip(a.vip);
+    if (i.ip === undefined || i.mask === undefined) return fail(c, "% Interface has no IP address: configure one before HSRP.");
+    if (!sameSubnet(vip, i.ip, i.mask) || vip === i.ip) return fail(c, `% ${formatIp(vip)} is not a valid virtual address on this interface's subnet`);
+    hsrp(c, Number(a.g)).ip = vip;
+  }, (d) => isRouter(d) && onL3If(d)),
+  spec("standby <int:g> priority <int:p>", "Priority level", (c, a) => {
+    const p = Number(a.p);
+    if (p > 255) return fail(c, "% Invalid input detected at '^' marker.");
+    hsrp(c, Number(a.g)).priority = p;
+  }, (d) => isRouter(d) && onL3If(d)),
+  spec("standby <int:g> preempt", "Overthrow lower priority Active routers", (c, a) => {
+    hsrp(c, Number(a.g)).preempt = true;
+  }, (d) => isRouter(d) && onL3If(d)),
+  spec("no standby <int:g> preempt", "Overthrow lower priority Active routers", (c, a) => {
+    hsrp(c, Number(a.g)).preempt = false;
+  }, (d) => isRouter(d) && onL3If(d)),
+  spec("standby version <int:v>", "HSRP version", (c, a) => {
+    if (Number(a.v) !== 1 && Number(a.v) !== 2) return fail(c, "% Invalid input detected at '^' marker.");
+  }, (d) => isRouter(d) && onL3If(d)),
+  spec("ipv6 address <ipv6p:a>", "Configure IPv6 address on interface", (c, a) => addV6(c, String(a.a), false), (d) => onL3If(d)),
+  spec("ipv6 address <ipv6p:a> eui-64", "Use eui-64 interface identifier", (c, a) => addV6(c, String(a.a), true), (d) => onL3If(d)),
+  spec("no ipv6 address", "Configure IPv6 address on interface", (c) => {
+    delete curIf(c).ipv6;
+  }, (d) => onL3If(d)),
+  spec("ipv6 enable", "Enable IPv6 on interface", (c) => {
+    curIf(c).ipv6Enabled = true;
+  }, (d) => onL3If(d)),
   spec("spanning-tree portfast", "Enable an interface to move directly to forwarding on link up", (c) => {
     curIf(c).switchport!.portfast = true;
     c.out.push(
@@ -643,6 +840,20 @@ function pcIpconfig(c: Ctx) {
   );
 }
 
+function pcIpv6config(c: Ctx) {
+  const e = c.dev.interfaces.Ethernet0;
+  const g = e.ipv6?.[0];
+  c.out.push(
+    "",
+    "FastEthernet0 Connection:(default port)",
+    "",
+    `   Link-local IPv6 Address.........: ${formatIp6((BigInt(0xfe80) << BigInt(112)) | eui64(c.dev.mac))}`,
+    `   IPv6 Address....................: ${g ? `${formatIp6(g.addr)}/${g.prefix}` : "::"}`,
+    `   Default Gateway.................: ${c.dev.gateway6 !== undefined ? formatIp6(c.dev.gateway6) : "::"}`,
+    "",
+  );
+}
+
 const pcCommands: S[] = [
   spec("ipconfig", "Display IP configuration", pcIpconfig),
   spec("ipconfig <ip:addr> <ip:mask> <ip:gw>", "Set IP address, mask and gateway", (c, a) => {
@@ -668,6 +879,28 @@ const pcCommands: S[] = [
     c.out.push("DHCP request successful.");
     pcIpconfig(c);
   }),
+  spec("ipv6config", "Display IPv6 configuration", (c) => pcIpv6config(c)),
+  spec("ipv6config <ipv6p:a> <ipv6:gw>", "Set IPv6 address and default gateway", (c, a) => {
+    const { addr, prefix } = parsePrefix6(String(a.a))!;
+    c.dev.interfaces.Ethernet0.ipv6 = [{ addr, prefix }];
+    c.dev.gateway6 = parseIp6(String(a.gw))!;
+  }),
+  spec("ipv6config autoconfig", "Get an IPv6 address by SLAAC (EUI-64)", (c) => {
+    const ra = slaacOffer(c.state, c.dev.id);
+    if (!ra) return fail(c, "IPv6 autoconfiguration failed: no router advertisement received.");
+    c.dev.interfaces.Ethernet0.ipv6 = [{ addr: ra.prefix | eui64(c.dev.mac), prefix: 64, eui64: true }];
+    c.dev.gateway6 = ra.gateway;
+    c.out.push("IPv6 autoconfiguration successful.");
+    pcIpv6config(c);
+  }),
+  spec("ping <ipv6:dst>", "Send echo messages", (c, a) => {
+    const target = parseIp6(String(a.dst))!;
+    const r = ping6(c.state, c.dev.id, target);
+    const t = formatIp6(target);
+    c.out.push("", `Pinging ${t} with 32 bytes of data:`, "");
+    for (let i = 0; i < 4; i++) c.out.push(r.ok ? `Reply from ${t}: bytes=32 time<1ms TTL=255` : r.unreachable ? "Destination host unreachable." : "Request timed out.");
+    c.out.push("", `Ping statistics for ${t}:`, `    Packets: Sent = 4, Received = ${r.ok ? 4 : 0}, Lost = ${r.ok ? 0 : 4} (${r.ok ? 0 : 100}% loss),`);
+  }),
   spec("ipconfig /release", "Release the DHCP lease", (c) => {
     const e = c.dev.interfaces["Ethernet0"];
     delete e.ip;
@@ -679,7 +912,7 @@ const pcCommands: S[] = [
   }),
   spec("ping <ip:dst>", "Send echo messages", (c, a) => pcPing(c, String(a.dst))),
   spec("help", "Display PC commands", (c) => {
-    c.out.push("Available Commands:", "  ipconfig                         Display IP configuration", "  ipconfig <ip> <mask> <gateway>   Set IP configuration", "  ipconfig /dhcp                   Get an address from DHCP", "  ipconfig /release                Release the DHCP address", "  ping <ip>                        Send echo request");
+    c.out.push("Available Commands:", "  ipconfig                         Display IP configuration", "  ipconfig <ip> <mask> <gateway>   Set IP configuration", "  ipconfig /dhcp                   Get an address from DHCP", "  ipconfig /release                Release the DHCP address", "  ipv6config <addr/len> <gateway>  Set IPv6 address and gateway", "  ipv6config autoconfig            Get an IPv6 address by SLAAC", "  ping <ip>                        Send echo request");
   }),
 ];
 
