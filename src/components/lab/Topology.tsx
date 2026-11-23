@@ -72,8 +72,16 @@ export function TopologyView({
         </filter>
       </defs>
       {topology.links.map((l) => {
-        const a = pos[l.a.device];
-        const b = pos[l.b.device];
+        // Parallel links between the same two devices fan out side by side.
+        const pair = (x: typeof l) => [x.a.device, x.b.device].sort().join("|");
+        const siblings = topology.links.filter((x) => pair(x) === pair(l));
+        const k = siblings.indexOf(l) - (siblings.length - 1) / 2;
+        const d0 = Math.hypot(pos[l.b.device].x - pos[l.a.device].x, pos[l.b.device].y - pos[l.a.device].y) || 1;
+        const sign = l.a.device < l.b.device ? 1 : -1;
+        const ox = ((-(pos[l.b.device].y - pos[l.a.device].y) / d0) * 30 * k) * sign;
+        const oy = (((pos[l.b.device].x - pos[l.a.device].x) / d0) * 30 * k) * sign;
+        const a = { x: pos[l.a.device].x + ox, y: pos[l.a.device].y + oy };
+        const b = { x: pos[l.b.device].x + ox, y: pos[l.b.device].y + oy };
         const st = status[l.id] ?? { a: false, b: false };
         const up = st.a && st.b;
         const lerp = (t: number) => ({ x: a.x + (b.x - a.x) * t, y: a.y + (b.y - a.y) * t });

@@ -1,7 +1,24 @@
 import type { CiscoState, Device } from "./model";
 import { shortName } from "./model";
 import { formatIp, maskToPrefix } from "./ip";
-import { ifaceState, l2Domains, ospfIfaces, ospfNeighbors, ospfRouterId, physicalUp, routingTable, type Route } from "./network";
+import {
+  attachedMac,
+  errDisabled,
+  hsrpMembers,
+  ifaceState,
+  l2Domains,
+  memberStatus,
+  ospfIfaces,
+  ospfNeighbors,
+  ospfRouterId,
+  physicalUp,
+  portSecurityState,
+  routingTable,
+  routingTable6,
+  v6Enabled,
+  type Route,
+} from "./network";
+import { formatIp6, linkLocal } from "./ip6";
 import { aclKind, formatEntry } from "./acl";
 import { spanningTreeAll, type BridgeId } from "./stp";
 
@@ -60,7 +77,7 @@ export function showVlanBrief(dev: Device): string[] {
 
 export function showInterfacesTrunk(state: CiscoState, dev: Device): string[] {
   const trunks = sortedIfaces(dev).filter(
-    (i) => i.switchport?.mode === "trunk" && ifaceState(state, dev.id, i.name).protocol === "up",
+    (i) => i.switchport?.mode === "trunk" && ifaceState(state, dev.id, i.name).protocol === "up" && !(i.channelGroup && memberStatus(state, dev.id, i.name) === "P"),
   );
   if (!trunks.length) return [];
   const vlans = Object.keys(dev.vlans).map(Number).sort((a, b) => a - b).join(",");
@@ -183,7 +200,7 @@ function linePassword(dev: Device, pw: string): string {
   return dev.security.passwordEncryption ? `password 7 ${type7(pw)}` : `password ${pw}`;
 }
 
-export function showRunningConfig(dev: Device): string[] {
+export function showRunningConfig(dev: Device, state?: CiscoState): string[] {
   const lines: string[] = ["Building configuration...", ""];
   const sec = dev.security;
   const body: string[] = [
@@ -223,9 +240,21 @@ export function showRunningConfig(dev: Device): string[] {
   for (const i of sortedIfaces(dev)) {
     body.push(`interface ${i.name}`);
     if (i.description) body.push(` description ${i.description}`);
+    if (i.dot1q !== undefined) body.push(` encapsulation dot1Q ${i.dot1q}`);
     if (i.switchport) {
       if (i.switchport.accessVlan !== 1) body.push(` switchport access vlan ${i.switchport.accessVlan}`);
       if (i.switchport.mode !== "dynamic") body.push(` switchport mode ${i.switchport.mode}`);
+      const ps = i.switchport.portSecurity;
+      if (ps) {
+        if (ps.enabled) body.push(" switchport port-security");
+        if (ps.max !== 1) body.push(` switchport port-security maximum ${ps.max}`);
+        if (ps.violation !== "shutdown") body.push(` switchport port-security violation ${ps.violation}`);
+        if (ps.sticky) body.push(" switchport port-security mac-address sticky");
+        const learned = state ? portSecurityState({ ...state, devices: { ...state.devices, [dev.id]: dev } }, dev.id, i.name)?.stickyMac : undefined;
+        if (learned) body.push(` switchport port-security mac-address sticky ${learned}`);
+        for (const m of ps.macs) body.push(` switchport port-security mac-address ${m}`);
+      }
+      if (i.channelGroup) body.push(` channel-group ${i.channelGroup.id} mode ${i.channelGroup.mode}`);
       if (i.switchport.portfast) body.push(" spanning-tree portfast");
       if (i.switchport.bpduguard) body.push(" spanning-tree bpduguard enable");
     } else if (i.ip !== undefined && i.mask !== undefined) {
@@ -233,10 +262,17 @@ export function showRunningConfig(dev: Device): string[] {
     } else {
       body.push(" no ip address");
     }
+    for (const [g, h] of Object.entries(i.hsrp ?? {})) {
+      if (h.ip !== undefined) body.push(` standby ${g} ip ${formatIp(h.ip)}`);
+      if (h.priority !== 100) body.push(` standby ${g} priority ${h.priority}`);
+      if (h.preempt) body.push(` standby ${g} preempt`);
+    }
+    for (const a of i.ipv6 ?? []) body.push(` ipv6 address ${a.eui64 ? formatIp6(a.addr & ~((BigInt(1) << BigInt(64)) - BigInt(1))) : formatIp6(a.addr)}/${a.prefix}${a.eui64 ? " eui-64" : ""}`);
+    if (i.ipv6Enabled) body.push(" ipv6 enable");
     if (i.acl?.in) body.push(` ip access-group ${i.acl.in} in`);
     if (i.acl?.out) body.push(` ip access-group ${i.acl.out} out`);
     if (i.nat) body.push(` ip nat ${i.nat}`);
-    if (dev.kind === "router" && !i.name.startsWith("Loopback")) body.push(" duplex auto", " speed auto");
+    if (dev.kind === "router" && !i.name.startsWith("Loopback") && !i.name.includes(".")) body.push(" duplex auto", " speed auto");
     if (i.shutdown) body.push(" shutdown");
     body.push("!");
   }
@@ -256,6 +292,8 @@ export function showRunningConfig(dev: Device): string[] {
   }
   if (dev.defaultGateway !== undefined) body.push(`ip default-gateway ${formatIp(dev.defaultGateway)}`);
   if (dev.kind === "router") body.push("ip classless");
+  if (dev.ipv6Routing) body.push("ipv6 unicast-routing");
+  for (const r of dev.staticRoutes6) body.push(`ipv6 route ${formatIp6(r.net)}/${r.prefix} ${formatIp6(r.nextHop)}`);
   for (const r of dev.staticRoutes) body.push(`ip route ${formatIp(r.net)} ${formatIp(r.mask)} ${formatIp(r.nextHop)}${r.ad ? " " + r.ad : ""}`);
   body.push("!", "ip flow-export version 9", "!");
   for (const [id, entries] of Object.entries(dev.acls)) for (const e of entries) body.push(`access-list ${id} ${formatEntry(e)}`);
@@ -322,7 +360,7 @@ export function showInterfacesStatus(state: CiscoState, dev: Device): string[] {
   const out = ["Port      Name               Status       Vlan       Duplex  Speed Type"];
   for (const i of sortedIfaces(dev)) {
     if (!i.switchport) continue;
-    const status = i.shutdown ? "disabled" : physicalUp(state, dev.id, i.name) ? "connected" : "notconnect";
+    const status = i.shutdown ? "disabled" : errDisabled(state, dev.id, i.name) ? "err-disabled" : physicalUp(state, dev.id, i.name) ? "connected" : "notconnect";
     const vlan = i.switchport.mode === "trunk" ? "trunk" : String(i.switchport.accessVlan);
     const gig = i.name.startsWith("Gigabit");
     out.push(pad(shortName(i.name), 10) + pad(i.description ?? "", 19) + pad(status, 13) + pad(vlan, 11) + pad("auto", 8) + pad("auto", 6) + (gig ? "10/100/1000BaseTX" : "10/100BaseTX"));
@@ -401,6 +439,139 @@ export function showAccessLists(dev: Device): string[] {
       if (!e.proto && e.src.wildcard === 0) body = body.replace(/^(permit|deny) /, "$1 host ");
       out.push(`    ${(i + 1) * 10} ${body}`);
     });
+  }
+  return out;
+}
+
+/* ---------------------------- Second-batch features ---------------------------- */
+
+export function showEtherchannelSummary(state: CiscoState, dev: Device): string[] {
+  const groups = new Map<number, string[]>();
+  for (const i of sortedIfaces(dev)) if (i.channelGroup) groups.set(i.channelGroup.id, [...(groups.get(i.channelGroup.id) ?? []), i.name]);
+  const out = [
+    "Flags:  D - down        P - bundled in port-channel",
+    "        I - stand-alone s - suspended",
+    "        H - Hot-standby (LACP only)",
+    "        R - Layer3      S - Layer2",
+    "        U - in use      f - failed to allocate aggregator",
+    "",
+    `Number of channel-groups in use: ${groups.size}`,
+    `Number of aggregators:           ${groups.size}`,
+    "",
+    "Group  Port-channel  Protocol    Ports",
+    "------+-------------+-----------+-----------------------------------------------",
+  ];
+  for (const [id, members] of [...groups].sort((a, b) => a[0] - b[0])) {
+    const up = physicalUp(state, dev.id, `Port-channel${id}`);
+    const mode = dev.interfaces[members[0]].channelGroup!.mode;
+    const proto = mode === "active" || mode === "passive" ? "LACP" : mode === "on" ? "-" : "PAgP";
+    const ports = members.map((m) => `${shortName(m)}(${memberStatus(state, dev.id, m)})`).join("  ");
+    out.push(pad(String(id), 7) + pad(`Po${id}(S${up ? "U" : "D"})`, 14) + pad(proto, 12) + ports);
+  }
+  return out;
+}
+
+export function showPortSecurity(state: CiscoState, dev: Device): string[] {
+  const out = [
+    "Secure Port  MaxSecureAddr  CurrentAddr  SecurityViolation  Security Action",
+    "                (Count)       (Count)          (Count)",
+    "---------------------------------------------------------------------------",
+  ];
+  for (const i of sortedIfaces(dev)) {
+    const ps = i.switchport?.portSecurity;
+    if (!ps?.enabled) continue;
+    const st = portSecurityState(state, dev.id, i.name);
+    out.push(pad(shortName(i.name), 13) + pad(String(ps.max), 15) + pad(String(st?.secure.length ?? 0), 13) + pad(st?.violation ? "1" : "0", 19) + ps.violation[0].toUpperCase() + ps.violation.slice(1));
+  }
+  out.push("---------------------------------------------------------------------------");
+  return out;
+}
+
+export function showPortSecurityInterface(state: CiscoState, dev: Device, name: string): string[] {
+  const ps = dev.interfaces[name]?.switchport?.portSecurity;
+  const st = portSecurityState(state, dev.id, name);
+  const enabled = !!ps?.enabled;
+  const status = !enabled ? "Secure-down" : errDisabled(state, dev.id, name) ? "Secure-shutdown" : physicalUp(state, dev.id, name) ? "Secure-up" : "Secure-down";
+  return [
+    `Port Security              : ${enabled ? "Enabled" : "Disabled"}`,
+    `Port Status                : ${status}`,
+    `Violation Mode             : ${ps ? ps.violation[0].toUpperCase() + ps.violation.slice(1) : "Shutdown"}`,
+    "Aging Time                 : 0 mins",
+    "Aging Type                 : Absolute",
+    "SecureStatic Address Aging : Disabled",
+    `Maximum MAC Addresses      : ${ps?.max ?? 1}`,
+    `Total MAC Addresses        : ${st?.secure.length ?? 0}`,
+    `Configured MAC Addresses   : ${ps?.macs.length ?? 0}`,
+    `Sticky MAC Addresses       : ${st?.stickyMac ? 1 : 0}`,
+    `Last Source Address:Vlan   : ${st?.violator ?? attachedMac(state, dev.id, name) ?? "0000.0000.0000"}:${dev.interfaces[name]?.switchport?.accessVlan ?? 1}`,
+    `Security Violation Count   : ${st?.violation ? 1 : 0}`,
+  ];
+}
+
+export function showMacAddressTable(state: CiscoState, dev: Device): string[] {
+  const out = ["          Mac Address Table", "-------------------------------------------", "", "Vlan    Mac Address       Type        Ports", "----    -----------       --------    -----"];
+  for (const i of sortedIfaces(dev)) {
+    if (!i.switchport || i.switchport.mode === "trunk" || !physicalUp(state, dev.id, i.name)) continue;
+    const mac = attachedMac(state, dev.id, i.name);
+    const st = portSecurityState(state, dev.id, i.name);
+    if (!mac || st?.violation) continue;
+    const type = st ? (st.stickyMac === mac || i.switchport.portSecurity?.macs.includes(mac) ? "STATIC" : "DYNAMIC") : "DYNAMIC";
+    out.push(pad(String(i.switchport.accessVlan).padStart(4), 8) + pad(mac.toLowerCase(), 18) + pad(type, 12) + shortName(i.name));
+  }
+  return out;
+}
+
+export function showStandbyBrief(state: CiscoState, dev: Device): string[] {
+  const uf = l2Domains(state);
+  const out = [
+    "                     P indicates configured to preempt.",
+    "                     |",
+    "Interface   Grp  Pri P State    Active          Standby         Virtual IP",
+  ];
+  for (const i of sortedIfaces(dev)) {
+    for (const [g, h] of Object.entries(i.hsrp ?? {})) {
+      const members = hsrpMembers(state, dev.id, i.name, Number(g), uf);
+      const idx = members.findIndex((m) => m.dev === dev.id && m.iface === i.name);
+      const st = ifaceState(state, dev.id, i.name).protocol !== "up" ? "Init" : idx === 0 ? "Active" : idx === 1 ? "Standby" : idx > 1 ? "Listen" : "Init";
+      const who = (k: number) => (members[k] ? (members[k].dev === dev.id ? "local" : formatIp(members[k].ip)) : "unknown");
+      out.push(
+        pad(shortName(i.name), 12) + pad(g, 5) + pad(String(h.priority), 4) + pad(h.preempt ? "P" : " ", 2) + pad(st, 9) + pad(who(0), 16) + pad(who(1), 16) + (h.ip !== undefined ? formatIp(h.ip) : "unknown"),
+      );
+    }
+  }
+  return out;
+}
+
+export function showIpv6IntBrief(state: CiscoState, dev: Device): string[] {
+  const out: string[] = [];
+  for (const i of sortedIfaces(dev)) {
+    if (i.switchport) continue;
+    const st = ifaceState(state, dev.id, i.name);
+    out.push(pad(i.name, 23) + `[${st.status}/${st.protocol}]`);
+    if (!v6Enabled(i)) out.push("    unassigned");
+    else {
+      out.push("    " + formatIp6(linkLocal(dev.mac)));
+      for (const a of i.ipv6 ?? []) out.push("    " + formatIp6(a.addr));
+    }
+  }
+  return out;
+}
+
+export function showIpv6Route(state: CiscoState, dev: Device): string[] {
+  const routes = routingTable6(state, dev.id).sort((a, b) => (a.net < b.net ? -1 : a.net > b.net ? 1 : a.prefix - b.prefix));
+  const out = [
+    `IPv6 Routing Table - default - ${routes.length} entries`,
+    "Codes: C - Connected, L - Local, S - Static, U - Per-user Static route",
+    "       B - BGP, R - RIP, H - NHRP, I1 - ISIS L1",
+    "       I2 - ISIS L2, IA - ISIS interarea, IS - ISIS summary, D - EIGRP",
+    "       EX - EIGRP external, ND - ND Default, NDp - ND Prefix, DCE - Destination",
+    "       NDr - Redirect, O - OSPF Intra, OI - OSPF Inter, OE1 - OSPF ext 1",
+    "       OE2 - OSPF ext 2, ON1 - OSPF NSSA ext 1, ON2 - OSPF NSSA ext 2",
+  ];
+  for (const r of routes) {
+    out.push(`${pad(r.source, 4)}${formatIp6(r.net)}/${r.prefix} [${r.ad}/0]`);
+    if (r.source === "S") out.push(`     via ${formatIp6(r.nextHop!)}`);
+    else out.push(`     via ${r.iface}, ${r.source === "L" ? "receive" : "directly connected"}`);
   }
   return out;
 }

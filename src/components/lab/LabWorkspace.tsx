@@ -66,7 +66,7 @@ function reducer(lab: Lab) {
         const r = lab.engine.exec(s.net, dev, a.line);
         const out: TermLine[] = r.output.map((text) => ({
           text,
-          kind: text.startsWith("%") && /^%(LINK|LINEPROTO|OSPF|SYS)-/.test(text) ? "log" : r.ok ? "out" : "err",
+          kind: text.startsWith("%") && /^%(LINK|LINEPROTO|OSPF|SYS|PORT_SECURITY|PM|SSH)-/.test(text) ? "log" : r.ok ? "out" : "err",
         }));
         const typed = a.line.trim() !== "" && !a.line.trim().endsWith("?");
         const history = typed ? { ...s.history, [dev]: [...(s.history[dev] ?? []), a.line].slice(-100) } : s.history;

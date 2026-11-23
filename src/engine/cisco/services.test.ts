@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { LABS } from "@/labs";
 import { COURSES } from "@/lib/courses";
 import { isUnlocked } from "@/lib/progression";
-import { ciscoEngine, parseIp, ping, spanningTreeAll, type CiscoState } from "./index";
+import { ciscoEngine, parseIp, parseIp6, ping, ping6, spanningTreeAll, type CiscoState } from "./index";
 
 const ip = (s: string) => parseIp(s)!;
 
@@ -127,8 +127,67 @@ describe("progression", () => {
     const done = new Set(["router-interface", "vlan-access", "static-ospf"]);
     expect(isUnlocked(ccna, "subnet-vlsm", done)).toBe(true);
     expect(isUnlocked(ccna, "vlan-access", done)).toBe(true);
-    expect(isUnlocked(ccna, "stp-root", done)).toBe(true);
+    expect(isUnlocked(ccna, "inter-vlan", done)).toBe(true);
+    expect(isUnlocked(ccna, "stp-root", done)).toBe(false);
     expect(isUnlocked(ccna, "floating-static", done)).toBe(true);
     expect(isUnlocked(ccna, "dhcp-nat", done)).toBe(false);
+  });
+});
+
+describe("second batch features", () => {
+  it("refuses an IP on a subinterface before its 802.1Q tag", () => {
+    const { out } = play("ccna/inter-vlan", [["R1", ["en", "conf t", "int g0/0.10", "ip add 192.168.10.1 255.255.255.0"]]]);
+    expect(out).toContain("only allowed if that");
+  });
+
+  it("does not bundle LACP passive/passive, and suspends on/active", () => {
+    const passive = play("ccna/etherchannel", [
+      ["SW1", ["en", "conf t", "int range fa0/23 - 24", "channel-group 1 mode passive", "end"]],
+      ["SW2", ["en", "conf t", "int range fa0/23 - 24", "channel-group 1 mode passive", "end", "show etherchannel summary"]],
+    ]);
+    expect(passive.out).toMatch(/Po1\(SD\)\s+LACP\s+Fa0\/23\(I\)/);
+    const mixed = play("ccna/etherchannel", [
+      ["SW1", ["en", "conf t", "int range fa0/23 - 24", "channel-group 1 mode on", "end"]],
+      ["SW2", ["en", "conf t", "int range fa0/23 - 24", "channel-group 1 mode active", "end", "show etherchannel summary"]],
+    ]);
+    expect(mixed.out).toContain("Fa0/23(s)");
+  });
+
+  it("shows the range prompt and applies commands to every port in it", () => {
+    const { s } = play("ccna/port-security", [["SW1", ["en", "conf t", "int range fa0/4 - 6", "shutdown"]]]);
+    expect(ciscoEngine.prompt(s, "SW1")).toBe("LOBBY-SW(config-if-range)#");
+    expect(["FastEthernet0/4", "FastEthernet0/5", "FastEthernet0/6"].every((p) => s.devices.SW1.interfaces[p].shutdown)).toBe(true);
+    expect(s.devices.SW1.interfaces["FastEthernet0/7"].shutdown).toBe(false);
+  });
+
+  it("port security in restrict mode keeps the port up but drops the violator", () => {
+    const { s, out } = play("ccna/port-security", [
+      ["SW1", ["en", "conf t", "int fa0/3", "sw port-security", "sw port-security violation restrict", "sw port-security mac-address 0060.3E1A.22B4", "end", "show interfaces status"]],
+    ]);
+    expect(out).toMatch(/Fa0\/3\s+PRINTER\s+connected/);
+    expect(ping(s, "PC3", ip("192.168.40.1")).ok).toBe(false);
+    expect(ping(s, "PC1", ip("192.168.40.1")).ok).toBe(true);
+  });
+
+  it("HSRP elects the higher priority router and fails over", () => {
+    const { s } = play("ccna/hsrp", [
+      ["R2", ["en", "conf t", "int g0/0", "standby 1 ip 192.168.50.1", "standby 1 priority 120", "end"]],
+      ["R1", ["en", "conf t", "int g0/0", "standby 1 ip 192.168.50.1", "end"]],
+    ]);
+    const roles = (st: CiscoState) => LABS["ccna/hsrp"].objectives.find((o) => o.id === "roles")!.check(st);
+    expect(roles(s)).toBe(false);
+    expect(ping(s, "PC1", ip("10.99.99.99")).ok).toBe(true);
+  });
+
+  it("a router without ipv6 unicast-routing does not forward IPv6", () => {
+    const { s } = play("ccna/ipv6-routing", [
+      ["R2", ["en", "conf t", "int g0/0", "ipv6 address 2001:db8:acad:2::1/64", "no shut", "int g0/1", "ipv6 address 2001:db8:acad:12::2/64", "no shut", "exit", "ipv6 route ::/0 2001:db8:acad:12::1", "end"]],
+      ["R1", ["en", "conf t", "ipv6 route 2001:db8:acad:2::/64 2001:db8:acad:12::2", "end"]],
+      ["PC2", ["ipv6config 2001:db8:acad:2::20/64 2001:db8:acad:2::1"]],
+    ]);
+    const target = parseIp6("2001:db8:acad:2::20")!;
+    expect(ping6(s, "PC1", target).ok).toBe(false);
+    const fixed = play("ccna/ipv6-routing", [["R2", ["conf t", "ipv6 unicast-routing", "end"]]], s);
+    expect(ping6(fixed.s, "PC1", target).ok).toBe(true);
   });
 });

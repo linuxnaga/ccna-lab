@@ -10,11 +10,55 @@ export interface Iface {
   shutdown: boolean;
   description?: string;
   /** Present on switch physical ports only. */
-  switchport?: { mode: "access" | "trunk" | "dynamic"; accessVlan: number; portfast?: boolean; bpduguard?: boolean };
+  switchport?: {
+    mode: "access" | "trunk" | "dynamic";
+    accessVlan: number;
+    portfast?: boolean;
+    bpduguard?: boolean;
+    portSecurity?: PortSecurity;
+  };
+  /** Router subinterfaces ("GigabitEthernet0/0.10"): the 802.1Q VLAN they carry. */
+  dot1q?: number;
+  /** EtherChannel membership ("channel-group 1 mode active"). */
+  channelGroup?: { id: number; mode: ChannelMode };
+  /** HSRP groups on this interface. */
+  hsrp?: Record<number, HsrpGroup>;
+  /** IPv6 global unicast addresses. A link-local address exists whenever ipv6Enabled or any address is set. */
+  ipv6?: Ipv6Addr[];
+  ipv6Enabled?: boolean;
   /** "ip nat inside|outside". */
   nat?: "inside" | "outside";
   /** "ip access-group <acl> in|out". */
   acl?: { in?: string; out?: string };
+}
+
+export type ChannelMode = "active" | "passive" | "on" | "desirable" | "auto";
+
+export interface PortSecurity {
+  enabled: boolean;
+  max: number;
+  sticky: boolean;
+  /** Statically configured secure MACs. */
+  macs: string[];
+  violation: "shutdown" | "restrict" | "protect";
+}
+
+export interface HsrpGroup {
+  ip?: number;
+  priority: number;
+  preempt: boolean;
+}
+
+export interface Ipv6Addr {
+  addr: bigint;
+  prefix: number;
+  eui64?: boolean;
+}
+
+export interface StaticRoute6 {
+  net: bigint;
+  prefix: number;
+  nextHop: bigint;
 }
 
 export interface StaticRoute {
@@ -84,7 +128,7 @@ export interface Device {
   hostname: string;
   mode: Mode;
   /** Context for sub-modes. */
-  ctx: { iface?: string; ospfPid?: number; vlan?: number; pool?: string; line?: "con" | "vty" };
+  ctx: { iface?: string; ospfPid?: number; vlan?: number; pool?: string; line?: "con" | "vty"; range?: string[] };
   interfaces: Record<string, Iface>;
   /** Switch VLAN database (id -> name). */
   vlans: Record<number, string>;
@@ -113,6 +157,10 @@ export interface Device {
     banner?: string;
     lines: { con: LineConfig; vty: LineConfig };
   };
+  ipv6Routing: boolean;
+  staticRoutes6: StaticRoute6[];
+  /** PCs: IPv6 default gateway (global or link-local). */
+  gateway6?: bigint;
   /** PCs: the router that leased the current address, when set by DHCP. */
   dhcpServer?: string;
   dns?: number;
@@ -130,6 +178,7 @@ export const IFACE_TYPES = [
   { full: "FastEthernet", short: "Fa" },
   { full: "Vlan", short: "Vlan" },
   { full: "Loopback", short: "Lo" },
+  { full: "Port-channel", short: "Po" },
 ] as const;
 
 export function shortName(full: string): string {
@@ -179,6 +228,8 @@ export function makeDevice(spec: DeviceSpec): Device {
     id: spec.id,
     kind: spec.kind,
     mac: macFor(spec.id),
+    ipv6Routing: false,
+    staticRoutes6: [],
     acls: {},
     nat: { rules: [], translations: [] },
     dhcp: { excluded: [], pools: {} },

@@ -1,13 +1,28 @@
 import type { ExecResult, Topology, TopologyLink, VendorEngine } from "../types";
-import { cloneDevice, makeDevice, type CiscoState, type Device, type Mode } from "./model";
+import { cloneDevice, makeDevice, shortName, type CiscoState, type Device, type Mode } from "./model";
 import { MODE_SPECS, PARENT, type Ctx } from "./commands";
 import { completeLine, match, nextOptions, type MatchResult, type Spec } from "./parser";
-import { ifaceState, l2Domains, ospfNeighbors } from "./network";
+import { ifaceState, l2Domains, ospfNeighbors, portSecurityState } from "./network";
 import { portBlocked } from "./stp";
 import { formatIp } from "./ip";
 
 export * from "./model";
-export { deliver, dhcpOffer, ifaceState, ping, routingTable, ospfNeighbors } from "./network";
+export {
+  deliver,
+  deliver6,
+  dhcpOffer,
+  hsrpMembers,
+  ifaceState,
+  memberStatus,
+  ping,
+  ping6,
+  portSecurityState,
+  errDisabled,
+  routingTable,
+  routingTable6,
+  ospfNeighbors,
+} from "./network";
+export { parseIp6, formatIp6, eui64 } from "./ip6";
 export { spanningTree, spanningTreeAll, portBlocked } from "./stp";
 export { aclPermits } from "./acl";
 export { parseIp, formatIp } from "./ip";
@@ -25,7 +40,19 @@ const SUFFIX: Record<Mode, string> = {
 };
 
 function promptFor(dev: Device): string {
-  return dev.kind === "pc" ? "C:\\>" : dev.hostname + SUFFIX[dev.mode];
+  if (dev.kind === "pc") return "C:\\>";
+  if (dev.mode === "if" && dev.ctx.range) return dev.hostname + "(config-if-range)#";
+  return dev.hostname + SUFFIX[dev.mode];
+}
+
+/** Port-channel members always forward with their port-channel's switchport settings, as IOS enforces. */
+function syncPortChannels(dev: Device) {
+  for (const m of Object.values(dev.interfaces)) {
+    const po = m.channelGroup && dev.interfaces[`Port-channel${m.channelGroup.id}`]?.switchport;
+    if (!po || !m.switchport) continue;
+    m.switchport.mode = po.mode;
+    m.switchport.accessVlan = po.accessVlan;
+  }
 }
 
 function specsFor(dev: Device, mode: Mode, ctx: Ctx): Spec<Ctx>[] {
@@ -59,10 +86,21 @@ function errorLines(prompt: string, r: MatchResult<Ctx>, line: string, mode: Mod
 
 function linkLogs(before: CiscoState, after: CiscoState, devId: string): string[] {
   const out: string[] = [];
+  for (const name of Object.keys(after.devices[devId].interfaces)) {
+    const was = before.devices[devId].interfaces[name] ? portSecurityState(before, devId, name) : null;
+    const now = portSecurityState(after, devId, name);
+    if (now?.violation && !was?.violation) {
+      const mode = after.devices[devId].interfaces[name].switchport!.portSecurity!.violation;
+      out.push(`%PORT_SECURITY-2-PSECURE_VIOLATION: Security violation occurred, caused by MAC address ${now.violator} on port ${name}.`);
+      if (mode === "shutdown") out.push(`%PM-4-ERR_DISABLE: psecure-violation error detected on ${shortName(name)}, putting ${shortName(name)} in err-disable state`);
+    }
+  }
   const dev = after.devices[devId];
   for (const name of Object.keys(dev.interfaces)) {
     const a = before.devices[devId].interfaces[name] ? ifaceState(before, devId, name) : null;
     const b = ifaceState(after, devId, name);
+    // A newly created interface only logs if it comes straight up (e.g. a loopback).
+    if (!a && b.status !== "up") continue;
     if (a?.status !== b.status) out.push(`%LINK-${b.status === "administratively down" ? 5 : 3}-CHANGED: Interface ${name}, changed state to ${b.status}`);
     if (a && a.protocol !== b.protocol) out.push(`%LINEPROTO-5-UPDOWN: Line protocol on Interface ${name}, changed state to ${b.protocol}`);
   }
@@ -132,7 +170,20 @@ function run(state: CiscoState, devId: string, line: string): ExecResult<CiscoSt
   }
 
   const wasMode = state.devices[devId].mode;
-  r.spec.run(ctx, r.args);
+  const range = dev.mode === "if" && wasMode === "if" ? dev.ctx.range : undefined;
+  if (range && !r.canonical.startsWith("do ")) {
+    // "interface range": run the command once per member port, like IOS.
+    for (const name of range) {
+      if (dev.mode !== "if" || !dev.ctx.range) break;
+      dev.ctx = { ...dev.ctx, iface: name };
+      r.spec.run(ctx, r.args);
+    }
+    if (dev.mode === "if" && dev.ctx.range) dev.ctx = { ...dev.ctx, iface: range[0] };
+    ctx.out = ctx.out.filter((l, i, all) => all.indexOf(l) === i || l === "");
+  } else {
+    r.spec.run(ctx, r.args);
+  }
+  if (dev.kind === "switch") syncPortChannels(dev);
   if (ctx.ok && !["user", "priv", "pc"].includes(wasMode)) dev.saved = false;
   const devices = { ...state.devices, [devId]: dev };
   if (ctx.ok) {

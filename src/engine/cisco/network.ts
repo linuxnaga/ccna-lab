@@ -1,7 +1,8 @@
 import type { TopologyLink } from "../types";
-import type { CiscoState, Device, Iface, NatTranslation } from "./model";
+import type { ChannelMode, CiscoState, Device, Iface, NatTranslation } from "./model";
 import { maskToPrefix, network, prefixToMask, sameSubnet, wildcardMatch } from "./ip";
 import { aclPermits, aclPermitsSource } from "./acl";
+import { isLinkLocal, linkLocal, network6, sameSubnet6 } from "./ip6";
 
 /* ------------------------------------------------------------------ */
 /* Interface and link state                                            */
@@ -30,6 +31,13 @@ export function ifaceState(state: CiscoState, devId: string, ifName: string): If
 
   if (ifName.startsWith("Loopback")) return { status: "up", protocol: "up" };
 
+  // Subinterfaces follow their physical parent.
+  if (iface.dot1q !== undefined || /\.\d+$/.test(ifName)) {
+    const parent = ifName.replace(/\.\d+$/, "");
+    const p = ifaceState(state, devId, parent);
+    return p.protocol === "up" ? { status: "up", protocol: "up" } : { status: p.status, protocol: "down" };
+  }
+
   if (ifName.startsWith("Vlan")) {
     const vlan = Number(ifName.slice(4));
     const active =
@@ -46,14 +54,99 @@ export function ifaceState(state: CiscoState, devId: string, ifName: string): If
   return { status: up ? "up" : "down", protocol: up ? "up" : "down" };
 }
 
-/** A physical port is up when it is not shut, cabled, and the far end is not shut. */
+/**
+ * A physical port is up when it is not shut, cabled, the far end is not shut,
+ * and port security has not err-disabled either end. A port-channel is up
+ * when at least one member is bundled.
+ */
 export function physicalUp(state: CiscoState, devId: string, ifName: string): boolean {
-  const iface = state.devices[devId]?.interfaces[ifName];
+  const dev = state.devices[devId];
+  const iface = dev?.interfaces[ifName];
   if (!iface || iface.shutdown) return false;
+  if (ifName.startsWith("Port-channel")) {
+    const id = Number(ifName.slice("Port-channel".length));
+    return Object.values(dev.interfaces).some((m) => m.channelGroup?.id === id && memberStatus(state, devId, m.name) === "P");
+  }
   const l = findLink(state, devId, ifName);
   if (!l) return false;
   const peer = state.devices[l.peer.device]?.interfaces[l.peer.port];
-  return !!peer && !peer.shutdown;
+  if (!peer || peer.shutdown) return false;
+  return !errDisabled(state, devId, ifName) && !errDisabled(state, l.peer.device, l.peer.port);
+}
+
+/* ------------------------------------------------------------------ */
+/* Port security                                                       */
+/* ------------------------------------------------------------------ */
+
+/** MAC of the end host cabled to a switch port, if any. */
+export function attachedMac(state: CiscoState, devId: string, ifName: string): string | undefined {
+  const l = findLink(state, devId, ifName);
+  const peer = l && state.devices[l.peer.device];
+  return peer && peer.kind !== "switch" ? peer.mac : undefined;
+}
+
+export interface SecureState {
+  /** MACs allowed on the port: static ones plus the learned host, when it fits. */
+  secure: string[];
+  /** The learned address is sticky (written to the running config). */
+  stickyMac?: string;
+  violation: boolean;
+  violator?: string;
+}
+
+export function portSecurityState(state: CiscoState, devId: string, ifName: string): SecureState | null {
+  const iface = state.devices[devId]?.interfaces[ifName];
+  const ps = iface?.switchport?.portSecurity;
+  if (!ps?.enabled || iface!.switchport!.mode !== "access") return null;
+  const mac = attachedMac(state, devId, ifName);
+  const secure = [...ps.macs];
+  if (!mac || secure.includes(mac)) return { secure, violation: false };
+  if (secure.length < ps.max) return { secure: [...secure, mac], stickyMac: ps.sticky ? mac : undefined, violation: false };
+  return { secure, violation: true, violator: mac };
+}
+
+/** Port security violation in shutdown mode: the port is err-disabled. */
+export function errDisabled(state: CiscoState, devId: string, ifName: string): boolean {
+  const ps = state.devices[devId]?.interfaces[ifName]?.switchport?.portSecurity;
+  if (!ps || ps.violation !== "shutdown") return false;
+  return !!portSecurityState(state, devId, ifName)?.violation;
+}
+
+/* ------------------------------------------------------------------ */
+/* EtherChannel                                                        */
+/* ------------------------------------------------------------------ */
+
+const COMPATIBLE: Record<ChannelMode, ChannelMode[]> = {
+  active: ["active", "passive"],
+  passive: ["active"],
+  on: ["on"],
+  desirable: ["desirable", "auto"],
+  auto: ["desirable"],
+};
+
+export type MemberStatus = "P" | "I" | "s" | "D";
+
+/** Bundled (P), stand-alone (I), suspended by a mode mismatch (s), or down (D). */
+export function memberStatus(state: CiscoState, devId: string, ifName: string): MemberStatus {
+  const iface = state.devices[devId]?.interfaces[ifName];
+  if (!iface?.channelGroup || !physicalUp(state, devId, ifName)) return "D";
+  const l = findLink(state, devId, ifName)!;
+  const peer = state.devices[l.peer.device].interfaces[l.peer.port];
+  const mine = iface.channelGroup.mode;
+  if (!peer.channelGroup) return mine === "on" ? "s" : "I";
+  const theirs = peer.channelGroup.mode;
+  if (COMPATIBLE[mine].includes(theirs)) return "P";
+  const lacp = (m: ChannelMode) => m === "active" || m === "passive";
+  const pagp = (m: ChannelMode) => m === "desirable" || m === "auto";
+  // Both negotiating but neither side starts (passive/passive, auto/auto): stays stand-alone.
+  if ((lacp(mine) && lacp(theirs)) || (pagp(mine) && pagp(theirs))) return "I";
+  return "s";
+}
+
+/** The logical STP/forwarding port: the port-channel for bundled members, otherwise the port itself. */
+export function logicalPort(state: CiscoState, devId: string, ifName: string): string {
+  const cg = state.devices[devId]?.interfaces[ifName]?.channelGroup;
+  return cg && memberStatus(state, devId, ifName) === "P" ? `Port-channel${cg.id}` : ifName;
 }
 
 /* ------------------------------------------------------------------ */
@@ -80,14 +173,34 @@ class UnionFind {
 const l3Key = (dev: string, iface: string) => `${dev}|${iface}`;
 const vlanKey = (dev: string, vlan: number) => `${dev}#${vlan}`;
 
-/** What a port contributes to the L2 graph: one untagged segment, or a set of tagged VLANs. */
-function attachment(dev: Device, iface: Iface): { untagged: string | null; tagged: number[] } {
-  if (!iface.switchport) return { untagged: l3Key(dev.id, iface.name), tagged: [] };
-  if (iface.switchport.mode === "trunk") {
-    return { untagged: 1 in dev.vlans ? vlanKey(dev.id, 1) : null, tagged: Object.keys(dev.vlans).map(Number) };
+interface Attachment {
+  untagged: string | null;
+  /** 802.1Q VLAN -> L2 node, for trunks and routers with subinterfaces. */
+  tagged: Map<number, string>;
+  trunk: boolean;
+}
+
+/** What a port contributes to the L2 graph: an untagged segment and, on trunks, tagged VLANs. */
+function attachment(state: CiscoState, dev: Device, iface: Iface): Attachment {
+  if (!iface.switchport) {
+    const tagged = new Map<number, string>();
+    if (dev.kind === "router") {
+      for (const sub of Object.values(dev.interfaces)) {
+        if (sub.dot1q !== undefined && !sub.shutdown && sub.name.startsWith(iface.name + ".")) tagged.set(sub.dot1q, l3Key(dev.id, sub.name));
+      }
+    }
+    return { untagged: l3Key(dev.id, iface.name), tagged, trunk: tagged.size > 0 };
   }
-  const v = iface.switchport.accessVlan;
-  return { untagged: v in dev.vlans ? vlanKey(dev.id, v) : null, tagged: [] };
+  // Bundled members forward with the port-channel's configuration.
+  const sp = iface.channelGroup && dev.interfaces[`Port-channel${iface.channelGroup.id}`]?.switchport && memberStatus(state, dev.id, iface.name) === "P"
+    ? dev.interfaces[`Port-channel${iface.channelGroup.id}`].switchport!
+    : iface.switchport;
+  if (sp.mode === "trunk") {
+    const tagged = new Map(Object.keys(dev.vlans).map((v) => [Number(v), vlanKey(dev.id, Number(v))] as const));
+    return { untagged: 1 in dev.vlans ? vlanKey(dev.id, 1) : null, tagged, trunk: true };
+  }
+  const v = sp.accessVlan;
+  return { untagged: v in dev.vlans ? vlanKey(dev.id, v) : null, tagged: new Map(), trunk: false };
 }
 
 export function l2Domains(state: CiscoState): UnionFind {
@@ -96,16 +209,17 @@ export function l2Domains(state: CiscoState): UnionFind {
     if (!physicalUp(state, link.a.device, link.a.port)) continue;
     const da = state.devices[link.a.device];
     const db = state.devices[link.b.device];
-    const ia = da.interfaces[link.a.port];
-    const ib = db.interfaces[link.b.port];
-    const aa = attachment(da, ia);
-    const ab = attachment(db, ib);
-    const bothTrunk = ia.switchport?.mode === "trunk" && ib.switchport?.mode === "trunk";
-    if (bothTrunk) {
-      for (const v of aa.tagged) if (ab.tagged.includes(v)) uf.union(vlanKey(da.id, v), vlanKey(db.id, v));
-    } else if (aa.untagged && ab.untagged) {
-      uf.union(aa.untagged, ab.untagged);
+    // Port security in restrict/protect mode drops the violating host's frames.
+    if (portSecurityState(state, da.id, link.a.port)?.violation || portSecurityState(state, db.id, link.b.port)?.violation) continue;
+    const aa = attachment(state, da, da.interfaces[link.a.port]);
+    const ab = attachment(state, db, db.interfaces[link.b.port]);
+    if (aa.trunk && ab.trunk) {
+      for (const [v, key] of aa.tagged) {
+        const other = ab.tagged.get(v);
+        if (other) uf.union(key, other);
+      }
     }
+    if (aa.untagged && ab.untagged) uf.union(aa.untagged, ab.untagged);
   }
   // Switch SVIs join their VLAN.
   for (const dev of Object.values(state.devices)) {
@@ -296,9 +410,13 @@ export type DeliveryResult =
 export type Flows = Map<string, number>;
 
 /** Who answers for an IP on a segment: a real interface, or a router publishing a static NAT global. */
-function ownerOf(state: CiscoState, ip: number): { dev: string; iface: string } | undefined {
+function ownerOf(state: CiscoState, ip: number, uf: UnionFind): { dev: string; iface: string } | undefined {
   for (const dev of Object.values(state.devices)) {
     for (const i of upL3Ifaces(state, dev)) if (i.ip === ip) return { dev: dev.id, iface: i.iface };
+  }
+  for (const dev of Object.values(state.devices)) {
+    const v = activeVip(state, dev, ip, uf);
+    if (v) return { dev: dev.id, iface: v };
   }
   for (const dev of Object.values(state.devices)) {
     if (dev.kind !== "router" || !dev.nat.rules.some((r) => r.kind === "static" && r.global === ip)) continue;
@@ -350,7 +468,7 @@ export function deliver(
         else if (stat?.kind === "static") dst = stat.local;
       }
     }
-    if (upL3Ifaces(state, dev).some((i) => i.ip === dst)) return { ok: true, hops, src: src ?? dst, dst };
+    if (upL3Ifaces(state, dev).some((i) => i.ip === dst) || activeVip(state, dev, dst, uf)) return { ok: true, hops, src: src ?? dst, dst };
     if (cur !== fromId && !isRouter) return { ok: false, reason: "timeout", at: cur };
 
     const routes = routingTable(state, cur, uf);
@@ -379,7 +497,7 @@ export function deliver(
       return { ok: false, reason: "filtered", at: cur };
     }
 
-    const owner = ownerOf(state, nextHop);
+    const owner = ownerOf(state, nextHop, uf);
     if (!owner) return { ok: false, reason: "timeout", at: cur };
     if (uf.find(l3Key(cur, egress!)) !== uf.find(l3Key(owner.dev, owner.iface))) {
       return { ok: false, reason: "timeout", at: cur };
@@ -416,6 +534,168 @@ export function ping(state: CiscoState, fromId: string, dst: number): PingResult
   if (owner === fromId) return { ok: true, unreachable: false, translations: [] };
   const back = deliver(state, owner, there.src, uf, { src: there.dst, flows });
   return { ok: back.ok, unreachable: !back.ok && back.reason !== "timeout", translations: back.ok ? translations() : [] };
+}
+
+/* ------------------------------------------------------------------ */
+/* HSRP                                                                */
+/* ------------------------------------------------------------------ */
+
+export interface HsrpMember {
+  dev: string;
+  iface: string;
+  ip: number;
+  priority: number;
+  preempt: boolean;
+}
+
+/** Routers in the same HSRP group and broadcast domain, best first (priority, then highest IP). */
+export function hsrpMembers(state: CiscoState, devId: string, ifName: string, group: number, uf = l2Domains(state)): HsrpMember[] {
+  const vip = state.devices[devId]?.interfaces[ifName]?.hsrp?.[group]?.ip;
+  if (vip === undefined) return [];
+  const here = uf.find(l3Key(devId, ifName));
+  const out: HsrpMember[] = [];
+  for (const dev of Object.values(state.devices)) {
+    if (dev.kind !== "router") continue;
+    for (const i of upL3Ifaces(state, dev)) {
+      const g = dev.interfaces[i.iface].hsrp?.[group];
+      if (!g || g.ip !== vip || !sameSubnet(vip, i.ip, i.mask) || uf.find(l3Key(dev.id, i.iface)) !== here) continue;
+      out.push({ dev: dev.id, iface: i.iface, ip: i.ip, priority: g.priority, preempt: g.preempt });
+    }
+  }
+  return out.sort((a, b) => b.priority - a.priority || b.ip - a.ip);
+}
+
+/** The interface on which this router answers for a virtual IP as HSRP active, if any. */
+export function activeVip(state: CiscoState, dev: Device, ip: number, uf: UnionFind): string | undefined {
+  if (dev.kind !== "router") return undefined;
+  for (const i of Object.values(dev.interfaces)) {
+    if (!i.hsrp) continue;
+    for (const [g, cfg] of Object.entries(i.hsrp)) {
+      if (cfg.ip !== ip) continue;
+      const best = hsrpMembers(state, dev.id, i.name, Number(g), uf)[0];
+      if (best && best.dev === dev.id && best.iface === i.name) return i.name;
+    }
+  }
+  return undefined;
+}
+
+/* ------------------------------------------------------------------ */
+/* IPv6                                                                */
+/* ------------------------------------------------------------------ */
+
+export interface L3If6 {
+  iface: string;
+  addr: bigint;
+  prefix: number;
+}
+
+export function v6Enabled(i: Iface): boolean {
+  return !!i.ipv6Enabled || !!i.ipv6?.length;
+}
+
+/** Up interfaces' IPv6 addresses, including link-local (prefix 64 under FE80::/10). */
+export function upIfaces6(state: CiscoState, dev: Device, withLinkLocal = true): L3If6[] {
+  const out: L3If6[] = [];
+  for (const i of Object.values(dev.interfaces)) {
+    if (!v6Enabled(i) || ifaceState(state, dev.id, i.name).protocol !== "up") continue;
+    if (withLinkLocal) out.push({ iface: i.name, addr: linkLocal(dev.mac), prefix: 64 });
+    for (const a of i.ipv6 ?? []) out.push({ iface: i.name, addr: a.addr, prefix: a.prefix });
+  }
+  return out;
+}
+
+export interface Route6 {
+  source: "C" | "L" | "S";
+  net: bigint;
+  prefix: number;
+  ad: number;
+  nextHop?: bigint;
+  iface?: string;
+}
+
+export function routingTable6(state: CiscoState, devId: string): Route6[] {
+  const dev = state.devices[devId];
+  const routes: Route6[] = [];
+  for (const i of upIfaces6(state, dev, false)) {
+    routes.push({ source: "C", net: network6(i.addr, i.prefix), prefix: i.prefix, ad: 0, iface: i.iface });
+    if (dev.kind === "router") routes.push({ source: "L", net: i.addr, prefix: 128, ad: 0, iface: i.iface });
+  }
+  const connected = routes.filter((r) => r.source === "C");
+  const resolvable = (nh: bigint) => connected.some((c) => sameSubnet6(nh, c.net, c.prefix));
+  if (dev.kind === "router") {
+    for (const r of dev.staticRoutes6) {
+      if (resolvable(r.nextHop) && !connected.some((c) => c.net === r.net && c.prefix === r.prefix)) {
+        routes.push({ source: "S", net: r.net, prefix: r.prefix, ad: 1, nextHop: r.nextHop });
+      }
+    }
+  } else if (dev.gateway6 !== undefined && (isLinkLocal(dev.gateway6) ? upIfaces6(state, dev).length > 0 : resolvable(dev.gateway6))) {
+    routes.push({ source: "S", net: BigInt(0), prefix: 0, ad: 1, nextHop: dev.gateway6, iface: isLinkLocal(dev.gateway6) ? "Ethernet0" : undefined });
+  }
+  return routes;
+}
+
+function lookup6(routes: Route6[], dst: bigint): Route6 | undefined {
+  let best: Route6 | undefined;
+  for (const r of routes) if (sameSubnet6(dst, r.net, r.prefix) && (!best || r.prefix > best.prefix)) best = r;
+  return best;
+}
+
+export type Delivery6 = { ok: true; hops: string[]; src: bigint } | { ok: false; reason: "no-route" | "timeout"; at: string };
+
+export function deliver6(state: CiscoState, fromId: string, dst: bigint, uf = l2Domains(state), src?: bigint): Delivery6 {
+  let cur = fromId;
+  const hops = [cur];
+  for (let ttl = 0; ttl < 16; ttl++) {
+    const dev = state.devices[cur];
+    const mine = upIfaces6(state, dev);
+    if (mine.some((i) => i.addr === dst)) return { ok: true, hops, src: src ?? dst };
+    if (cur !== fromId && (dev.kind !== "router" || !dev.ipv6Routing)) return { ok: false, reason: "timeout", at: cur };
+    const routes = routingTable6(state, cur);
+    const route = lookup6(routes, dst);
+    if (!route) return { ok: false, reason: "no-route", at: cur };
+    const nextHop = route.source === "C" ? dst : route.nextHop!;
+    let egress = route.iface;
+    if (!egress) {
+      const conn = lookup6(routes.filter((r) => r.source === "C"), nextHop);
+      if (!conn) return { ok: false, reason: "no-route", at: cur };
+      egress = conn.iface!;
+    }
+    if (src === undefined) src = mine.find((i) => i.iface === egress && !isLinkLocal(i.addr))?.addr ?? mine.find((i) => i.iface === egress)?.addr;
+    const domain = uf.find(l3Key(cur, egress));
+    let owner: { dev: string; iface: string } | undefined;
+    for (const d of Object.values(state.devices)) {
+      const hit = upIfaces6(state, d).find((i) => i.addr === nextHop && uf.find(l3Key(d.id, i.iface)) === domain);
+      if (hit) { owner = { dev: d.id, iface: hit.iface }; break; }
+    }
+    if (!owner) return { ok: false, reason: "timeout", at: cur };
+    cur = owner.dev;
+    hops.push(cur);
+  }
+  return { ok: false, reason: "timeout", at: cur };
+}
+
+export function ping6(state: CiscoState, fromId: string, dst: bigint): { ok: boolean; unreachable: boolean } {
+  const uf = l2Domains(state);
+  const there = deliver6(state, fromId, dst, uf);
+  if (!there.ok) return { ok: false, unreachable: there.reason === "no-route" };
+  const owner = there.hops[there.hops.length - 1];
+  if (owner === fromId || there.src === undefined) return { ok: owner === fromId, unreachable: false };
+  const back = deliver6(state, owner, there.src, uf, dst);
+  return { ok: back.ok, unreachable: false };
+}
+
+/** SLAAC: the first IPv6 router on the segment advertising a /64. */
+export function slaacOffer(state: CiscoState, clientId: string, clientIf = "Ethernet0"): { prefix: bigint; gateway: bigint } | null {
+  if (!physicalUp(state, clientId, clientIf)) return null;
+  const uf = l2Domains(state);
+  const me = uf.find(l3Key(clientId, clientIf));
+  for (const dev of Object.values(state.devices)) {
+    if (dev.kind !== "router" || !dev.ipv6Routing) continue;
+    for (const i of upIfaces6(state, dev, false)) {
+      if (i.prefix === 64 && uf.find(l3Key(dev.id, i.iface)) === me) return { prefix: network6(i.addr, 64), gateway: linkLocal(dev.mac) };
+    }
+  }
+  return null;
 }
 
 /* ------------------------------------------------------------------ */
