@@ -106,6 +106,7 @@ function Workspace({ lab, courseId, player }: { lab: Lab; courseId: string; play
   const [award, setAward] = useState<{ awarded: number } | { error: string } | null>(null);
   const [briefingOpen, setBriefingOpen] = useState(true);
   const [cheatOpen, setCheatOpen] = useState(false);
+  const [focusTick, setFocusTick] = useState(0);
 
   const status = useMemo(
     () => Object.fromEntries(lab.topology.links.map((l) => [l.id, lab.engine.linkStatus(s.net, lab.topology, l)])),
@@ -176,7 +177,10 @@ function Workspace({ lab, courseId, player }: { lab: Lab; courseId: string; play
       <div className="mt-4 grid gap-4 lg:grid-cols-[minmax(0,5fr)_minmax(0,6fr)]">
         <div className="flex flex-col gap-4">
           <div className="aspect-[5/3] rounded-lg border border-slate-700 bg-slate-950/70">
-            <TopologyView topology={lab.topology} status={status} active={s.active} onSelect={(d) => dispatch({ type: "select", device: d })} />
+            <TopologyView topology={lab.topology} status={status} active={s.active} onSelect={(d) => {
+              dispatch({ type: "select", device: d });
+              setFocusTick((t) => t + 1);
+            }} />
           </div>
           <div className="rounded-lg border border-slate-700 bg-slate-900/70 p-4">
             <h2 className="font-mono text-xs uppercase tracking-widest text-cyan-300">Objectives</h2>
@@ -211,6 +215,7 @@ function Workspace({ lab, courseId, player }: { lab: Lab; courseId: string; play
             onSubmit={(line) => dispatch({ type: "exec", line })}
             onComplete={(line) => lab.engine.complete(s.net, s.active, line)}
             onInterrupt={() => dispatch({ type: "interrupt" })}
+            focusKey={focusTick}
           />
         </div>
       </div>

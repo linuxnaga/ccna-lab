@@ -37,7 +37,7 @@ src/
     api/progress              Records a completed lab and awards XP once
   engine/
     types.ts                  Vendor-neutral engine + lab contracts
-    cisco/                    Cisco IOS emulator (parser, modes, show, ping, OSPF)
+    cisco/                    Cisco IOS emulator (parser, modes, show, ping, OSPF, STP, ACLs, NAT, DHCP)
   labs/
     ccna/*.ts                 Lab definitions: topology, start state, objectives, hints
   components/lab/             Topology SVG, terminal, workspace, cheat sheet
@@ -96,8 +96,16 @@ Import the GitHub repo in Vercel, add the same environment variables (with `NEXT
 | # | Lab | Domain | What the student does |
 | --- | --- | --- | --- |
 | 1 | Branch Router Bring-up (free) | Network Fundamentals | Hostname, interface IP, `no shutdown`, ping, save config |
-| 2 | Sales VLAN Cannot Reach the Gateway | Switching & VLANs | Create VLAN 10, access ports, uplink, keep guest isolated, management SVI |
-| 3 | Two Sites, One Network | IP Routing | Address a router, bring up a /30 WAN, OSPF area 0 with router IDs, end-to-end ping |
+| 2 | Carve Up the /24 | Network Fundamentals | VLSM a /24 into /25, /26 and /27 subnets, address the router and PCs |
+| 3 | Sales VLAN Cannot Reach the Gateway | Switching & VLANs | Create VLAN 10, access ports, uplink, keep guest isolated, management SVI |
+| 4 | The Wrong Root Bridge | Switching & STP | Restore a VLAN and trunk, make the core the STP root, Rapid PVST+, PortFast and BPDU Guard |
+| 5 | Two Sites, One Network | IP Routing | Address a router, bring up a /30 WAN, OSPF area 0 with router IDs, end-to-end ping |
+| 6 | Backup Link Failover | IP Routing | Static and default routes with floating statics (AD 10) over a backup path |
+| 7 | Branch Internet Edge | IP Services | DHCP server with exclusions, PAT (NAT overload) and static NAT for a web server |
+| 8 | Lock Down the Server Farm | Security | Standard and extended ACLs, enable secret, console password, SSH-only VTY |
+| 9 | Ticket #4471: Floor 3 Is Down | Troubleshooting | Find five planted faults: gateway, VLAN, shutdown, mask and OSPF area mismatches |
+
+Labs unlock in order. A lab a player already completed stays open even if a new lab is inserted before it.
 
 ## Tests
 
@@ -105,7 +113,7 @@ Import the GitHub repo in Vercel, add the same environment variables (with `NEXT
 npm test
 ```
 
-Engine tests cover parsing, modes, error messages, VLANs, static routes and OSPF. Every lab is also played with a reference solution, which must complete all objectives without a CLI error.
+Engine tests cover parsing, modes, error messages, VLANs, STP, static and floating static routes, OSPF, ACLs, NAT and DHCP. Every lab is also played with a reference solution, which must complete all objectives without a CLI error.
 
 ## Adding a lab
 

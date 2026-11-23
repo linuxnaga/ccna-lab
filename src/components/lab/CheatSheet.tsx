@@ -35,12 +35,58 @@ const SECTIONS: { title: string; rows: [string, string][] }[] = [
     ],
   },
   {
+    title: "Spanning tree",
+    rows: [
+      ["spanning-tree mode rapid-pvst", "Use Rapid PVST+ (faster convergence)"],
+      ["spanning-tree vlan 10 root primary", "Make this switch the root bridge for VLAN 10"],
+      ["spanning-tree vlan 10 priority 4096", "Set the bridge priority (multiples of 4096)"],
+      ["spanning-tree portfast", "Host port: skip listening/learning (interface)"],
+      ["spanning-tree bpduguard enable", "Shut the port if a switch is plugged in (interface)"],
+      ["show spanning-tree vlan 10", "Root bridge, port roles and blocked ports"],
+    ],
+  },
+  {
     title: "Routing",
     rows: [
       ["ip route 10.2.0.0 255.255.0.0 10.0.0.2", "Static route: network, mask, next hop"],
       ["router ospf 1", "Start OSPF process 1"],
       ["router-id 1.1.1.1", "Set the OSPF router ID"],
       ["network 10.0.0.0 0.0.0.3 area 0", "Enable OSPF on matching interfaces (wildcard mask)"],
+      ["ip route 0.0.0.0 0.0.0.0 10.0.0.1", "Default route (gateway of last resort)"],
+      ["ip route 0.0.0.0 0.0.0.0 10.0.9.1 10", "Floating static: AD 10 backs up the AD 1 route"],
+    ],
+  },
+  {
+    title: "DHCP and NAT",
+    rows: [
+      ["ip dhcp excluded-address 10.1.1.1 10.1.1.20", "Keep addresses out of the pool"],
+      ["ip dhcp pool LAN / network ... / default-router ...", "Define a DHCP pool (dns-server too)"],
+      ["ip nat inside  |  ip nat outside", "Mark NAT interfaces (interface)"],
+      ["ip nat inside source list 1 interface g0/1 overload", "PAT: many inside hosts share one public IP"],
+      ["ip nat inside source static 10.1.1.100 203.0.113.5", "Static NAT: publish one inside host"],
+      ["show ip nat translations / show ip dhcp binding", "Verify NAT entries and DHCP leases"],
+    ],
+  },
+  {
+    title: "ACLs",
+    rows: [
+      ["access-list 10 deny 10.3.0.0 0.0.255.255", "Standard (1-99): source only. Place near the destination"],
+      ["access-list 110 deny ip <src> <wc> <dst> <wc>", "Extended (100-199): place near the source"],
+      ["access-list 110 permit ip any any", "Every ACL ends with an implicit deny any"],
+      ["ip access-group 10 out", "Apply an ACL to an interface (in or out)"],
+      ["show access-lists", "List entries in order"],
+    ],
+  },
+  {
+    title: "Device hardening",
+    rows: [
+      ["enable secret <pw>", "Hashed privileged EXEC password"],
+      ["service password-encryption", "Encrypt line passwords in the config"],
+      ["line con 0 / password <pw> / login", "Console password"],
+      ["ip domain-name lab.local", "Needed before RSA keys"],
+      ["crypto key generate rsa general-keys modulus 1024", "Keys for SSH (768+ bits for v2)"],
+      ["username admin secret <pw>", "Local user account"],
+      ["line vty 0 4 / login local / transport input ssh", "SSH-only remote access"],
     ],
   },
   {
@@ -51,6 +97,8 @@ const SECTIONS: { title: string; rows: [string, string][] }[] = [
       ["show vlan brief", "VLANs and their access ports"],
       ["show ip route", "Routing table (C, L, S, O codes)"],
       ["show ip ospf neighbor", "OSPF adjacencies"],
+      ["show ip protocols  /  show ip ospf int br", "OSPF networks, areas and interfaces"],
+      ["show interfaces status", "Switch ports: connected, VLAN or trunk"],
       ["ping 192.168.1.1", "Test reachability (! = reply, . = timeout)"],
       ["do <command>", "Run a show/ping from config mode"],
       ["copy running-config startup-config  (wr)", "Save the configuration"],
@@ -63,6 +111,7 @@ const SECTIONS: { title: string; rows: [string, string][] }[] = [
       ["?", "List what can come next"],
       ["Up / Down", "Command history"],
       ["Click a device", "Open its console"],
+      ["ipconfig  /  ipconfig /dhcp", "PC: show addressing, or lease one by DHCP"],
     ],
   },
 ];

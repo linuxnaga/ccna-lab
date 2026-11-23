@@ -1,6 +1,6 @@
 import type { Topology } from "../types";
 
-export type Mode = "user" | "priv" | "config" | "if" | "router" | "vlan" | "pc";
+export type Mode = "user" | "priv" | "config" | "if" | "router" | "vlan" | "dhcp" | "line" | "pc";
 
 export interface Iface {
   /** Full name, e.g. "GigabitEthernet0/0", "FastEthernet0/1", "Vlan1". */
@@ -10,13 +10,60 @@ export interface Iface {
   shutdown: boolean;
   description?: string;
   /** Present on switch physical ports only. */
-  switchport?: { mode: "access" | "trunk" | "dynamic"; accessVlan: number };
+  switchport?: { mode: "access" | "trunk" | "dynamic"; accessVlan: number; portfast?: boolean; bpduguard?: boolean };
+  /** "ip nat inside|outside". */
+  nat?: "inside" | "outside";
+  /** "ip access-group <acl> in|out". */
+  acl?: { in?: string; out?: string };
 }
 
 export interface StaticRoute {
   net: number;
   mask: number;
   nextHop: number;
+  /** Administrative distance; omitted means 1. Higher values make a floating static. */
+  ad?: number;
+}
+
+/** Address match used by ACLs: "any" is { ip: 0, wildcard: 255.255.255.255 }. */
+export interface AddrMatch {
+  ip: number;
+  wildcard: number;
+}
+
+export interface AclEntry {
+  action: "permit" | "deny";
+  /** Standard ACLs only match the source; extended ACLs also match protocol and destination. */
+  proto?: "ip" | "icmp" | "tcp" | "udp";
+  src: AddrMatch;
+  dst?: AddrMatch;
+  port?: number;
+}
+
+export type NatRule =
+  | { kind: "overload"; acl: string; iface: string }
+  | { kind: "static"; local: number; global: number };
+
+export interface NatTranslation {
+  proto: "icmp";
+  insideGlobal: number;
+  insideLocal: number;
+  outside: number;
+}
+
+export interface DhcpPool {
+  name: string;
+  net?: number;
+  mask?: number;
+  defaultRouter?: number;
+  dns?: number;
+  domain?: string;
+}
+
+export interface LineConfig {
+  password?: string;
+  login?: "line" | "local";
+  transport?: "ssh" | "telnet" | "all" | "none";
 }
 
 export interface OspfNetwork {
@@ -37,7 +84,7 @@ export interface Device {
   hostname: string;
   mode: Mode;
   /** Context for sub-modes. */
-  ctx: { iface?: string; ospfPid?: number; vlan?: number };
+  ctx: { iface?: string; ospfPid?: number; vlan?: number; pool?: string; line?: "con" | "vty" };
   interfaces: Record<string, Iface>;
   /** Switch VLAN database (id -> name). */
   vlans: Record<number, string>;
@@ -47,6 +94,28 @@ export interface Device {
   defaultGateway?: number;
   /** Has "copy run start" been run since the last change? */
   saved: boolean;
+  /** Burned-in MAC, used for STP bridge IDs and DHCP bindings ("0001.4A11.0001"). */
+  mac: string;
+  /** Numbered access lists, keyed by number as typed. */
+  acls: Record<string, AclEntry[]>;
+  nat: { rules: NatRule[]; translations: NatTranslation[] };
+  dhcp: { excluded: [number, number][]; pools: Record<string, DhcpPool> };
+  /** Switches: spanning-tree mode and per-VLAN bridge priority (without the sys-id-ext). */
+  stp: { mode: "pvst" | "rapid-pvst"; priority: Record<number, number> };
+  security: {
+    enableSecret?: string;
+    enablePassword?: string;
+    passwordEncryption: boolean;
+    domainName?: string;
+    rsaBits?: number;
+    sshVersion?: 2;
+    users: Record<string, string>;
+    banner?: string;
+    lines: { con: LineConfig; vty: LineConfig };
+  };
+  /** PCs: the router that leased the current address, when set by DHCP. */
+  dhcpServer?: string;
+  dns?: number;
 }
 
 export interface CiscoState {
@@ -60,6 +129,7 @@ export const IFACE_TYPES = [
   { full: "GigabitEthernet", short: "Gi" },
   { full: "FastEthernet", short: "Fa" },
   { full: "Vlan", short: "Vlan" },
+  { full: "Loopback", short: "Lo" },
 ] as const;
 
 export function shortName(full: string): string {
@@ -75,6 +145,14 @@ interface DeviceSpec {
   kind: "router" | "switch" | "pc";
   /** Router: Gig port count (GigabitEthernet0/0..n-1). Switch: Fa port count (FastEthernet0/1..n). */
   ports?: number;
+}
+
+/** Deterministic Cisco-style MAC from a device id. */
+export function macFor(id: string): string {
+  let h = 2166136261;
+  for (const ch of id) h = Math.imul(h ^ ch.charCodeAt(0), 16777619) >>> 0;
+  const hex = h.toString(16).toUpperCase().padStart(8, "0");
+  return `00E0.${hex.slice(0, 4)}.${hex.slice(4, 8)}`;
 }
 
 export function makeDevice(spec: DeviceSpec): Device {
@@ -100,6 +178,12 @@ export function makeDevice(spec: DeviceSpec): Device {
   return {
     id: spec.id,
     kind: spec.kind,
+    mac: macFor(spec.id),
+    acls: {},
+    nat: { rules: [], translations: [] },
+    dhcp: { excluded: [], pools: {} },
+    stp: { mode: "pvst", priority: {} },
+    security: { passwordEncryption: false, users: {}, lines: { con: {}, vty: {} } },
     hostname: spec.hostname ?? (spec.kind === "router" ? "Router" : spec.kind === "switch" ? "Switch" : spec.id),
     mode: spec.kind === "pc" ? "pc" : "user",
     ctx: {},

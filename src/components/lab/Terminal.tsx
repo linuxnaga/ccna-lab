@@ -15,6 +15,7 @@ export function Terminal({
   onComplete,
   onInterrupt,
   title,
+  focusKey,
 }: {
   lines: TermLine[];
   prompt: string;
@@ -23,6 +24,8 @@ export function Terminal({
   onComplete: (line: string) => string;
   onInterrupt: () => void;
   title: string;
+  /** Changes whenever the console should grab focus again (e.g. a device was clicked). */
+  focusKey?: number;
 }) {
   const [value, setValue] = useState("");
   const [cursor, setCursor] = useState<number | null>(null);
@@ -35,7 +38,7 @@ export function Terminal({
 
   useEffect(() => {
     inputRef.current?.focus();
-  }, [title]);
+  }, [title, focusKey]);
 
   function onKeyDown(e: React.KeyboardEvent<HTMLInputElement>) {
     if (e.key === "Enter") {

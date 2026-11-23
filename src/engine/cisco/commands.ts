@@ -1,8 +1,24 @@
-import type { CiscoState, Device, Mode } from "./model";
+import type { AclEntry, AddrMatch, CiscoState, Device, Mode } from "./model";
 import { formatIp, isHostAddress, maskToPrefix, network, parseIp, sameSubnet } from "./ip";
-import { spec, type Spec } from "./parser";
-import { ping } from "./network";
-import { showInterfacesTrunk, showIpIntBrief, showIpRoute, showOspfNeighbor, showRunningConfig, showVlanBrief } from "./show";
+import { spec, type Args, type Spec } from "./parser";
+import { dhcpOffer, ping, type PingResult } from "./network";
+import { ANY, aclKind } from "./acl";
+import { spanningTreeAll } from "./stp";
+import {
+  showAccessLists,
+  showDhcpBinding,
+  showInterfacesStatus,
+  showInterfacesTrunk,
+  showIpIntBrief,
+  showIpProtocols,
+  showIpRoute,
+  showNatTranslations,
+  showOspfIfBrief,
+  showOspfNeighbor,
+  showRunningConfig,
+  showSpanningTree,
+  showVlanBrief,
+} from "./show";
 
 export interface Ctx {
   /** State before the command (read-only). */
@@ -13,6 +29,8 @@ export interface Ctx {
   ok: boolean;
   /** Re-dispatch (used by "do"). */
   execIn: (mode: Mode, line: string) => void;
+  /** Changes to other devices (e.g. NAT translations created on a router by a PC's ping). */
+  effects: ((devices: Record<string, Device>) => void)[];
 }
 
 type S = Spec<Ctx>;
@@ -45,9 +63,22 @@ function ensureVlan(ctx: Ctx, id: number): boolean {
 
 /* ---------------------------- EXEC ---------------------------- */
 
+/** Remember the NAT translations a ping created, for "show ip nat translations". */
+function recordNat(ctx: Ctx, r: PingResult) {
+  for (const { router, t } of r.translations) {
+    const apply = (d: Device) => {
+      const list = d.nat.translations.filter((x) => !(x.insideLocal === t.insideLocal && x.outside === t.outside));
+      d.nat.translations = [...list, t].slice(-20);
+    };
+    if (router === ctx.dev.id) apply(ctx.dev);
+    else ctx.effects.push((devices) => apply(devices[router]));
+  }
+}
+
 function doPing(ctx: Ctx, dst: string) {
   const target = ip(dst);
   const r = ping(ctx.state, ctx.dev.id, target);
+  recordNat(ctx, r);
   const marks = r.ok ? "!!!!!" : r.unreachable ? "U.U.U" : ".....";
   const ok = r.ok ? 5 : 0;
   ctx.out.push(
@@ -81,6 +112,26 @@ const privExec: S[] = [
   spec("show ip ospf neighbor", "Neighbor list", (c) => c.out.push(...showOspfNeighbor(c.state, c.dev)), isRouter),
   spec("show vlan brief", "VTP all VLAN status in brief", (c) => c.out.push(...showVlanBrief(c.dev)), isSwitch),
   spec("show interfaces trunk", "Show interface trunk information", (c) => c.out.push(...showInterfacesTrunk(c.state, c.dev)), isSwitch),
+  spec("show interfaces status", "Show interface line status", (c) => c.out.push(...showInterfacesStatus(c.state, c.dev)), isSwitch),
+  spec("show spanning-tree", "Spanning tree topology", (c) => c.out.push(...showSpanningTree(c.state, c.dev)), isSwitch),
+  spec("show spanning-tree vlan <int:vlan>", "Spanning tree topology", (c, a) => {
+    const out = showSpanningTree(c.state, c.dev, Number(a.vlan));
+    if (!out.length) return fail(c, `Spanning tree instance(s) for vlan ${a.vlan} does not exist.`);
+    c.out.push(...out);
+  }, isSwitch),
+  spec("show ip protocols", "IP routing protocol process parameters and statistics", (c) => c.out.push(...showIpProtocols(c.state, c.dev)), isRouter),
+  spec("show ip ospf interface brief", "Brief summary of OSPF interfaces", (c) => c.out.push(...showOspfIfBrief(c.state, c.dev)), isRouter),
+  spec("show ip nat translations", "Translation entries", (c) => c.out.push(...showNatTranslations(c.dev)), isRouter),
+  spec("clear ip nat translation *", "Delete all dynamic translations", (c) => {
+    c.dev.nat.translations = [];
+  }, isRouter),
+  spec("show ip dhcp binding", "DHCP address bindings", (c) => c.out.push(...showDhcpBinding(c.state, c.dev)), isRouter),
+  spec("show access-lists", "List access lists", (c) => c.out.push(...showAccessLists(c.dev))),
+  spec("show ip ssh", "Information on SSH", (c) => {
+    const sec = c.dev.security;
+    if (!sec.rsaBits) return void c.out.push("SSH Disabled - version 1.99", "%Please create RSA keys to enable SSH (and of atleast 768 bits for SSH v2).");
+    c.out.push(`SSH Enabled - version ${sec.sshVersion === 2 ? "2.0" : "1.99"}`, "Authentication timeout: 120 secs; Authentication retries: 3", `RSA key size: ${sec.rsaBits} bits`);
+  }),
   spec("copy running-config startup-config", "Copy from current system configuration", (c) => {
     c.out.push("Destination filename [startup-config]? ", "Building configuration...", "[OK]");
     c.dev.saved = true;
@@ -98,6 +149,105 @@ const privExec: S[] = [
 ];
 
 /* ---------------------------- CONFIG ---------------------------- */
+
+function addStatic(c: Ctx, a: Args) {
+  const net = ip(a.net);
+  const mask = ip(a.mask);
+  if (maskToPrefix(mask) === null || network(net, mask) !== net) return fail(c, "%Inconsistent address and mask");
+  const nh = ip(a.nh);
+  const ad = a.ad === undefined ? undefined : Number(a.ad);
+  if (ad !== undefined && (ad < 1 || ad > 255)) return fail(c, "% Invalid input detected at '^' marker.");
+  if (Object.values(c.dev.interfaces).some((i) => i.ip === nh)) return fail(c, "%Invalid next hop address (it's this router)");
+  const existing = c.dev.staticRoutes.find((r) => r.net === net && r.mask === mask && r.nextHop === nh);
+  if (existing) {
+    if (ad === undefined || ad === 1) delete existing.ad;
+    else existing.ad = ad;
+  } else {
+    c.dev.staticRoutes.push(ad === undefined || ad === 1 ? { net, mask, nextHop: nh } : { net, mask, nextHop: nh, ad });
+  }
+}
+
+/* Access lists: every combination of source/destination forms, generated as specs. */
+
+const SRC_FORMS = [
+  { pat: "any", get: (): AddrMatch => ANY },
+  { pat: "host <ip:srcHost>", get: (a: Args): AddrMatch => ({ ip: ip(a.srcHost), wildcard: 0 }) },
+  { pat: "<ip:srcNet> <ip:srcWc>", get: (a: Args): AddrMatch => ({ ip: (ip(a.srcNet) & ~ip(a.srcWc)) >>> 0, wildcard: ip(a.srcWc) }) },
+];
+const DST_FORMS = SRC_FORMS.map((f) => ({
+  pat: f.pat.replace(/src/g, "dst"),
+  get: (a: Args) => f.get(Object.fromEntries(Object.entries(a).map(([k, v]) => [k.replace(/^dst/, "src"), v]))),
+}));
+
+function addAce(c: Ctx, a: Args, kind: "standard" | "extended", entry: AclEntry) {
+  const n = Number(a.n);
+  const actual = aclKind(n);
+  if (!actual) return fail(c, "% Invalid input detected at '^' marker.", "% Use 1-99 for standard and 100-199 for extended access lists.");
+  if (actual !== kind) {
+    return fail(
+      c,
+      actual === "standard"
+        ? `% Access list ${n} is a standard list: it only matches a source, e.g. "access-list ${n} permit 192.168.1.0 0.0.0.255".`
+        : `% Access list ${n} is an extended list: give a protocol, source and destination, e.g. "access-list ${n} deny ip any any".`,
+    );
+  }
+  const list = (c.dev.acls[String(n)] ??= []);
+  const same = (x: AclEntry) => JSON.stringify(x) === JSON.stringify(entry);
+  if (!list.some(same)) list.push(entry);
+}
+
+const aclSpecs: S[] = [];
+for (const action of ["permit", "deny"] as const) {
+  aclSpecs.push(spec(`access-list <int:n> ${action} <ip:srcHost>`, "Add an access list entry", (c, a) =>
+    addAce(c, a, "standard", { action, src: { ip: ip(a.srcHost), wildcard: 0 } }), isRouter));
+  for (const sf of SRC_FORMS) {
+    aclSpecs.push(spec(`access-list <int:n> ${action} ${sf.pat}`, "Add an access list entry", (c, a) =>
+      addAce(c, a, "standard", { action, src: sf.get(a) }), isRouter));
+    for (const proto of ["ip", "icmp", "tcp", "udp"] as const) {
+      for (const df of DST_FORMS) {
+        const base = `access-list <int:n> ${action} ${proto} ${sf.pat} ${df.pat}`;
+        aclSpecs.push(spec(base, "Add an access list entry", (c, a) =>
+          addAce(c, a, "extended", { action, proto, src: sf.get(a), dst: df.get(a) }), isRouter));
+        if (proto === "tcp" || proto === "udp") {
+          aclSpecs.push(spec(`${base} eq <int:port>`, "Add an access list entry", (c, a) =>
+            addAce(c, a, "extended", { action, proto, src: sf.get(a), dst: df.get(a), port: Number(a.port) }), isRouter));
+        }
+      }
+    }
+  }
+}
+
+function genKeys(c: Ctx, bits: number) {
+  const sec = c.dev.security;
+  if (c.dev.hostname === "Router" || c.dev.hostname === "Switch") return fail(c, "% Please define a hostname other than Router.");
+  if (!sec.domainName) return fail(c, "% Please define a domain-name first.");
+  if (bits < 360 || bits > 4096) return fail(c, "% Invalid input detected at '^' marker.", "% Key size must be between 360 and 4096 bits.");
+  c.out.push(
+    `The name for the keys will be: ${c.dev.hostname}.${sec.domainName}`,
+    `Choose the size of the key modulus in the range of 360 to 4096 for your`,
+    `  General Purpose Keys. Choosing a key modulus greater than 512 may take`,
+    `  a few minutes.`,
+    "",
+    `How many bits in the modulus [512]: ${bits}`,
+    `% Generating ${bits} bit RSA keys, keys will be non-exportable...[OK]`,
+    "",
+    `*Mar 1 0:12:31.123: %SSH-5-ENABLED: SSH 1.99 has been enabled`,
+  );
+  sec.rsaBits = bits;
+}
+
+function setRootPriority(c: Ctx, vlan: number, primary: boolean) {
+  if (!ensureVlan(c, vlan)) return;
+  if (!primary) {
+    c.dev.stp.priority[vlan] = 28672;
+    return;
+  }
+  // Like IOS: 24576, or 4096 below the current root if that is already lower.
+  const tree = spanningTreeAll(c.state, vlan)[c.dev.id];
+  const rootBase = tree && tree.rootDevice !== c.dev.id ? tree.root.priority - vlan : Infinity;
+  const target = rootBase <= 24576 ? Math.max(0, rootBase - 4096) : 24576;
+  c.dev.stp.priority[vlan] = target;
+}
 
 const common: S[] = [
   spec("end", "Exit to privileged EXEC mode", (c) => {
@@ -131,14 +281,11 @@ const globalConfig: S[] = [
   spec("no ip default-gateway", "Specify default gateway (if not routing IP)", (c) => {
     delete c.dev.defaultGateway;
   }, isSwitch),
-  spec("ip route <ip:net> <ip:mask> <ip:nh>", "Establish static routes", (c, a) => {
-    const net = ip(a.net);
-    const mask = ip(a.mask);
-    if (maskToPrefix(mask) === null || network(net, mask) !== net) return fail(c, "%Inconsistent address and mask");
-    const nh = ip(a.nh);
-    if (!c.dev.staticRoutes.some((r) => r.net === net && r.mask === mask && r.nextHop === nh)) {
-      c.dev.staticRoutes.push({ net, mask, nextHop: nh });
-    }
+  spec("ip route <ip:net> <ip:mask> <ip:nh>", "Establish static routes", (c, a) => addStatic(c, a), isRouter),
+  spec("ip route <ip:net> <ip:mask> <ip:nh> <int:ad>", "Establish static routes", (c, a) => addStatic(c, a), isRouter),
+  spec("no ip route <ip:net> <ip:mask> <ip:nh> <int:ad>", "Establish static routes", (c, a) => {
+    const [net, mask, nh] = [ip(a.net), ip(a.mask), ip(a.nh)];
+    c.dev.staticRoutes = c.dev.staticRoutes.filter((r) => !(r.net === net && r.mask === mask && r.nextHop === nh));
   }, isRouter),
   spec("no ip route <ip:net> <ip:mask> <ip:nh>", "Establish static routes", (c, a) => {
     const [net, mask, nh] = [ip(a.net), ip(a.mask), ip(a.nh)];
@@ -156,6 +303,118 @@ const globalConfig: S[] = [
   spec("no router ospf <int:pid>", "Open Shortest Path First (OSPF)", (c, a) => {
     if (c.dev.ospf?.pid === Number(a.pid)) c.dev.ospf = null;
   }, isRouter),
+  ...aclSpecs,
+  spec("no access-list <int:n>", "Add an access list entry", (c, a) => {
+    delete c.dev.acls[String(a.n)];
+  }, isRouter),
+  spec("ip nat inside source list <word:acl> interface <iface:o> overload", "Specify access list describing local addresses", (c, a) => {
+    const rule = { kind: "overload" as const, acl: String(a.acl), iface: String(a.o) };
+    c.dev.nat.rules = c.dev.nat.rules.filter((r) => !(r.kind === "overload" && r.acl === rule.acl));
+    c.dev.nat.rules.push(rule);
+  }, isRouter),
+  spec("no ip nat inside source list <word:acl> interface <iface:o> overload", "Specify access list describing local addresses", (c, a) => {
+    c.dev.nat.rules = c.dev.nat.rules.filter((r) => !(r.kind === "overload" && r.acl === String(a.acl)));
+  }, isRouter),
+  spec("ip nat inside source static <ip:local> <ip:global>", "Specify static local->global mapping", (c, a) => {
+    const [local, global] = [ip(a.local), ip(a.global)];
+    if (c.dev.nat.rules.some((r) => r.kind === "static" && (r.local === local || r.global === global))) {
+      return fail(c, `% ${formatIp(local)} already mapped (${formatIp(local)} -> ${formatIp(global)})`);
+    }
+    c.dev.nat.rules.push({ kind: "static", local, global });
+  }, isRouter),
+  spec("no ip nat inside source static <ip:local> <ip:global>", "Specify static local->global mapping", (c, a) => {
+    const [local, global] = [ip(a.local), ip(a.global)];
+    c.dev.nat.rules = c.dev.nat.rules.filter((r) => !(r.kind === "static" && r.local === local && r.global === global));
+  }, isRouter),
+  spec("ip dhcp excluded-address <ip:lo>", "Prevent DHCP from assigning certain addresses", (c, a) => {
+    c.dev.dhcp.excluded.push([ip(a.lo), ip(a.lo)]);
+  }, isRouter),
+  spec("ip dhcp excluded-address <ip:lo> <ip:hi>", "Prevent DHCP from assigning certain addresses", (c, a) => {
+    const [lo, hi] = [ip(a.lo), ip(a.hi)];
+    if (hi < lo) return fail(c, "% Invalid address range");
+    c.dev.dhcp.excluded.push([lo, hi]);
+  }, isRouter),
+  spec("no ip dhcp excluded-address <ip:lo> <ip:hi>", "Prevent DHCP from assigning certain addresses", (c, a) => {
+    const [lo, hi] = [ip(a.lo), ip(a.hi)];
+    c.dev.dhcp.excluded = c.dev.dhcp.excluded.filter(([x, y]) => !(x === lo && y === hi));
+  }, isRouter),
+  spec("ip dhcp pool <word:name>", "Configure DHCP address pools", (c, a) => {
+    const name = String(a.name);
+    c.dev.dhcp.pools[name] ??= { name };
+    setMode(c, "dhcp", { pool: name });
+  }, isRouter),
+  spec("no ip dhcp pool <word:name>", "Configure DHCP address pools", (c, a) => {
+    delete c.dev.dhcp.pools[String(a.name)];
+  }, isRouter),
+  spec("spanning-tree mode rapid-pvst", "Per-Vlan rapid spanning tree mode", (c) => {
+    c.dev.stp.mode = "rapid-pvst";
+  }, isSwitch),
+  spec("spanning-tree mode pvst", "Per-Vlan spanning tree mode", (c) => {
+    c.dev.stp.mode = "pvst";
+  }, isSwitch),
+  spec("spanning-tree vlan <int:vlan> priority <int:p>", "Set the bridge priority for the spanning tree", (c, a) => {
+    const p = Number(a.p);
+    if (p > 61440 || p % 4096 !== 0) {
+      return fail(c, "% Bridge Priority must be in increments of 4096.", "% Allowed values are:", "  0     4096  8192  12288 16384 20480 24576 28672", "  32768 36864 40960 45056 49152 53248 57344 61440");
+    }
+    if (ensureVlan(c, Number(a.vlan))) c.dev.stp.priority[Number(a.vlan)] = p;
+  }, isSwitch),
+  spec("spanning-tree vlan <int:vlan> root primary", "Configure switch as root", (c, a) => setRootPriority(c, Number(a.vlan), true), isSwitch),
+  spec("spanning-tree vlan <int:vlan> root secondary", "Configure switch as secondary root", (c, a) => setRootPriority(c, Number(a.vlan), false), isSwitch),
+  spec("no spanning-tree vlan <int:vlan> priority", "Set the bridge priority for the spanning tree", (c, a) => {
+    delete c.dev.stp.priority[Number(a.vlan)];
+  }, isSwitch),
+  spec("no spanning-tree vlan <int:vlan>", "VLAN Switch Spanning Tree", (c, a) => {
+    delete c.dev.stp.priority[Number(a.vlan)];
+  }, isSwitch),
+  spec("enable secret <word:pw>", "Assign the privileged level secret", (c, a) => {
+    c.dev.security.enableSecret = String(a.pw);
+  }),
+  spec("enable password <word:pw>", "Assign the privileged level password", (c, a) => {
+    c.dev.security.enablePassword = String(a.pw);
+  }),
+  spec("no enable secret", "Assign the privileged level secret", (c) => {
+    delete c.dev.security.enableSecret;
+  }),
+  spec("service password-encryption", "Encrypt system passwords", (c) => {
+    c.dev.security.passwordEncryption = true;
+  }),
+  spec("no service password-encryption", "Encrypt system passwords", (c) => {
+    c.dev.security.passwordEncryption = false;
+  }),
+  spec("ip domain-name <word:d>", "Define the default domain name", (c, a) => {
+    c.dev.security.domainName = String(a.d);
+  }),
+  spec("ip domain name <word:d>", "Define the default domain name", (c, a) => {
+    c.dev.security.domainName = String(a.d);
+  }),
+  spec("crypto key generate rsa", "Generate RSA keys", (c) => genKeys(c, 512)),
+  spec("crypto key generate rsa modulus <int:bits>", "Generate RSA keys", (c, a) => genKeys(c, Number(a.bits))),
+  spec("crypto key generate rsa general-keys modulus <int:bits>", "Generate RSA keys", (c, a) => genKeys(c, Number(a.bits))),
+  spec("ip ssh version <int:version>", "Specify protocol version to be supported", (c, a) => {
+    const v = Number(a.version);
+    if (v !== 1 && v !== 2) return fail(c, "% Invalid input detected at '^' marker.");
+    if (v === 2 && (c.dev.security.rsaBits ?? 0) < 768) return fail(c, "Please create RSA keys (of atleast 768 bits size) to enable SSH v2.");
+    if (v === 2) c.dev.security.sshVersion = 2;
+    else delete c.dev.security.sshVersion;
+  }),
+  spec("username <word:u> secret <word:pw>", "Establish User Name Authentication", (c, a) => {
+    c.dev.security.users[String(a.u)] = String(a.pw);
+  }),
+  spec("username <word:u> password <word:pw>", "Establish User Name Authentication", (c, a) => {
+    c.dev.security.users[String(a.u)] = String(a.pw);
+  }),
+  spec("banner motd <line:text>", "Set Message of the Day banner", (c, a) => {
+    const t = String(a.text);
+    const d = t[0];
+    const end = t.indexOf(d, 1);
+    c.dev.security.banner = end > 0 ? t.slice(1, end) : t.slice(1);
+  }),
+  spec("line console 0", "Primary terminal line", (c) => setMode(c, "line", { line: "con" })),
+  spec("line vty <int:a> <int:b>", "Virtual terminal", (c, a) => {
+    if (Number(a.a) !== 0 || Number(a.b) < 4 || Number(a.b) > 15) return fail(c, "% Invalid input detected at '^' marker.", "% Use 'line vty 0 4' or 'line vty 0 15' in this lab.");
+    setMode(c, "line", { line: "vty" });
+  }),
   spec("ip routing", "Enable IP routing", () => {}),
   spec("no ip domain-lookup", "Disable IP Domain Name System hostname translation", () => {}),
   spec("ip domain-lookup", "Enable IP Domain Name System hostname translation", () => {}),
@@ -215,6 +474,52 @@ const ifConfig: S[] = [
   spec("no switchport access vlan", "Set VLAN when interface is in access mode", (c) => {
     curIf(c).switchport!.accessVlan = 1;
   }, onSwitchPort),
+  spec("spanning-tree portfast", "Enable an interface to move directly to forwarding on link up", (c) => {
+    curIf(c).switchport!.portfast = true;
+    c.out.push(
+      "%Warning: portfast should only be enabled on ports connected to a single",
+      " host. Connecting hubs, concentrators, switches, bridges, etc... to this",
+      " interface  when portfast is enabled, can cause temporary bridging loops.",
+      " Use with CAUTION",
+      "",
+      `%Portfast has been configured on ${c.dev.ctx.iface} but will only`,
+      " have effect when the interface is in a non-trunking mode.",
+    );
+  }, onSwitchPort),
+  spec("no spanning-tree portfast", "Enable an interface to move directly to forwarding on link up", (c) => {
+    delete curIf(c).switchport!.portfast;
+  }, onSwitchPort),
+  spec("spanning-tree bpduguard enable", "Enable BPDU guard for this interface", (c) => {
+    curIf(c).switchport!.bpduguard = true;
+  }, onSwitchPort),
+  spec("spanning-tree bpduguard disable", "Disable BPDU guard for this interface", (c) => {
+    delete curIf(c).switchport!.bpduguard;
+  }, onSwitchPort),
+  spec("no spanning-tree bpduguard", "Don't configure BPDU guard for this interface", (c) => {
+    delete curIf(c).switchport!.bpduguard;
+  }, onSwitchPort),
+  spec("ip nat inside", "Inside interface for address translation", (c) => {
+    curIf(c).nat = "inside";
+  }, (d) => isRouter(d) && onL3If(d)),
+  spec("ip nat outside", "Outside interface for address translation", (c) => {
+    curIf(c).nat = "outside";
+  }, (d) => isRouter(d) && onL3If(d)),
+  spec("no ip nat inside", "Inside interface for address translation", (c) => {
+    if (curIf(c).nat === "inside") delete curIf(c).nat;
+  }, (d) => isRouter(d) && onL3If(d)),
+  spec("no ip nat outside", "Outside interface for address translation", (c) => {
+    if (curIf(c).nat === "outside") delete curIf(c).nat;
+  }, (d) => isRouter(d) && onL3If(d)),
+  ...(["in", "out"] as const).flatMap((dir) => [
+    spec<Ctx>(`ip access-group <word:acl> ${dir}`, "Specify access control for packets", (c, a) => {
+      const i = curIf(c);
+      i.acl = { ...i.acl, [dir]: String(a.acl) };
+    }, (d: Device) => isRouter(d) && onL3If(d)),
+    spec<Ctx>(`no ip access-group <word:acl> ${dir}`, "Specify access control for packets", (c) => {
+      const i = curIf(c);
+      if (i.acl) delete i.acl[dir];
+    }, (d: Device) => isRouter(d) && onL3If(d)),
+  ]),
   spec("exit", "Exit from interface configuration mode", (c) => setMode(c, "config")),
   ...common,
 ];
@@ -224,7 +529,11 @@ const routerConfig: S[] = [
     const [net, wc, area] = [ip(a.net), ip(a.wc), Number(a.area)];
     const o = c.dev.ospf!;
     const normalized = (net & ~wc) >>> 0;
-    if (!o.networks.some((n) => n.net === normalized && n.wildcard === wc)) o.networks.push({ net: normalized, wildcard: wc, area });
+    const existing = o.networks.find((n) => n.net === normalized && n.wildcard === wc);
+    if (existing && existing.area !== area) {
+      return fail(c, `% OSPF: "network ${formatIp(normalized)} ${formatIp(wc)} area ${existing.area}" is already configured.`, `  Remove it with "no network ${formatIp(normalized)} ${formatIp(wc)} area ${existing.area}" first.`);
+    }
+    if (!existing) o.networks.push({ net: normalized, wildcard: wc, area });
   }),
   spec("no network <ip:net> <ip:wc> area <int:area>", "Enable routing on an IP network", (c, a) => {
     const [net, wc] = [ip(a.net), ip(a.wc)];
@@ -250,14 +559,69 @@ const vlanConfig: S[] = [
   ...common,
 ];
 
+const pool = (c: Ctx) => c.dev.dhcp.pools[c.dev.ctx.pool!];
+
+const dhcpConfig: S[] = [
+  spec("network <ip:net> <ip:mask>", "Network number and mask", (c, a) => {
+    const [net, mask] = [ip(a.net), ip(a.mask)];
+    if (maskToPrefix(mask) === null) return fail(c, "% Invalid mask");
+    Object.assign(pool(c), { net: network(net, mask), mask });
+  }),
+  spec("default-router <ip:gw>", "Default routers", (c, a) => {
+    pool(c).defaultRouter = ip(a.gw);
+  }),
+  spec("dns-server <ip:dns>", "DNS servers", (c, a) => {
+    pool(c).dns = ip(a.dns);
+  }),
+  spec("domain-name <word:d>", "Domain name", (c, a) => {
+    pool(c).domain = String(a.d);
+  }),
+  spec("exit", "Exit from DHCP pool configuration mode", (c) => setMode(c, "config")),
+  ...common,
+];
+
+const line = (c: Ctx) => c.dev.security.lines[c.dev.ctx.line!];
+
+const lineConfig: S[] = [
+  spec("password <word:pw>", "Set a password", (c, a) => {
+    line(c).password = String(a.pw);
+  }),
+  spec("no password", "Set a password", (c) => {
+    delete line(c).password;
+  }),
+  spec("login", "Enable password checking", (c) => {
+    if (!line(c).password) c.out.push("% Login disabled on line, until 'password' is set");
+    line(c).login = "line";
+  }),
+  spec("login local", "Local password checking", (c) => {
+    line(c).login = "local";
+  }),
+  spec("no login", "Enable password checking", (c) => {
+    delete line(c).login;
+  }),
+  ...(["ssh", "telnet", "all", "none"] as const).map((t) =>
+    spec<Ctx>(`transport input ${t}`, "Define which protocols to use when connecting to the terminal server", (c) => {
+      line(c).transport = t;
+    }, (d: Device) => d.ctx.line === "vty"),
+  ),
+  spec("exec-timeout <int:m> <int:s>", "Set the EXEC timeout", () => {}),
+  spec("logging synchronous", "Synchronized message output", () => {}),
+  spec("exit", "Exit from line configuration mode", (c) => setMode(c, "config")),
+  ...common,
+];
+
 /* ---------------------------- PC ---------------------------- */
 
 function pcPing(ctx: Ctx, dst: string) {
   const target = ip(dst);
   const r = ping(ctx.state, ctx.dev.id, target);
+  recordNat(ctx, r);
   const t = formatIp(target);
+  const gw = ctx.dev.defaultGateway !== undefined ? formatIp(ctx.dev.defaultGateway) : t;
   ctx.out.push("", `Pinging ${t} with 32 bytes of data:`, "");
-  for (let i = 0; i < 4; i++) ctx.out.push(r.ok ? `Reply from ${t}: bytes=32 time<1ms TTL=255` : "Request timed out.");
+  for (let i = 0; i < 4; i++) {
+    ctx.out.push(r.ok ? `Reply from ${t}: bytes=32 time<1ms TTL=255` : r.unreachable ? `Reply from ${gw}: Destination host unreachable.` : "Request timed out.");
+  }
   ctx.out.push(
     "",
     `Ping statistics for ${t}:`,
@@ -265,28 +629,57 @@ function pcPing(ctx: Ctx, dst: string) {
   );
 }
 
+function pcIpconfig(c: Ctx) {
+  const e = c.dev.interfaces["Ethernet0"];
+  c.out.push(
+    "",
+    "FastEthernet0 Connection:(default port)",
+    "",
+    `   IPv4 Address....................: ${e.ip !== undefined ? formatIp(e.ip) : "0.0.0.0"}`,
+    `   Subnet Mask.....................: ${e.mask !== undefined ? formatIp(e.mask) : "0.0.0.0"}`,
+    `   Default Gateway.................: ${c.dev.defaultGateway !== undefined ? formatIp(c.dev.defaultGateway) : "0.0.0.0"}`,
+    ...(c.dev.dns !== undefined ? [`   DNS Servers.....................: ${formatIp(c.dev.dns)}`] : []),
+    "",
+  );
+}
+
 const pcCommands: S[] = [
-  spec("ipconfig", "Display IP configuration", (c) => {
-    const e = c.dev.interfaces["Ethernet0"];
-    c.out.push(
-      "",
-      "FastEthernet0 Connection:(default port)",
-      "",
-      `   IPv4 Address....................: ${e.ip !== undefined ? formatIp(e.ip) : "0.0.0.0"}`,
-      `   Subnet Mask.....................: ${e.mask !== undefined ? formatIp(e.mask) : "0.0.0.0"}`,
-      `   Default Gateway.................: ${c.dev.defaultGateway !== undefined ? formatIp(c.dev.defaultGateway) : "0.0.0.0"}`,
-      "",
-    );
-  }),
+  spec("ipconfig", "Display IP configuration", pcIpconfig),
   spec("ipconfig <ip:addr> <ip:mask> <ip:gw>", "Set IP address, mask and gateway", (c, a) => {
+    const [addr, mask] = [ip(a.addr), ip(a.mask)];
+    if (maskToPrefix(mask) === null) return fail(c, "Invalid subnet mask.");
+    if (!isHostAddress(addr, mask)) return fail(c, `Invalid IP address: ${formatIp(addr)} is the network or broadcast address of its subnet.`);
     const e = c.dev.interfaces["Ethernet0"];
-    e.ip = ip(a.addr);
-    e.mask = ip(a.mask);
+    e.ip = addr;
+    e.mask = mask;
     c.dev.defaultGateway = ip(a.gw);
+    delete c.dev.dhcpServer;
+  }),
+  spec("ipconfig /dhcp", "Request an address from a DHCP server", (c) => {
+    const lease = dhcpOffer(c.state, c.dev.id);
+    if (!lease) return fail(c, "DHCP request failed.");
+    const e = c.dev.interfaces["Ethernet0"];
+    e.ip = lease.ip;
+    e.mask = lease.mask;
+    if (lease.gateway !== undefined) c.dev.defaultGateway = lease.gateway;
+    else delete c.dev.defaultGateway;
+    if (lease.dns !== undefined) c.dev.dns = lease.dns;
+    c.dev.dhcpServer = lease.server;
+    c.out.push("DHCP request successful.");
+    pcIpconfig(c);
+  }),
+  spec("ipconfig /release", "Release the DHCP lease", (c) => {
+    const e = c.dev.interfaces["Ethernet0"];
+    delete e.ip;
+    delete e.mask;
+    delete c.dev.defaultGateway;
+    delete c.dev.dns;
+    delete c.dev.dhcpServer;
+    pcIpconfig(c);
   }),
   spec("ping <ip:dst>", "Send echo messages", (c, a) => pcPing(c, String(a.dst))),
   spec("help", "Display PC commands", (c) => {
-    c.out.push("Available Commands:", "  ipconfig                         Display IP configuration", "  ipconfig <ip> <mask> <gateway>   Set IP configuration", "  ping <ip>                        Send echo request");
+    c.out.push("Available Commands:", "  ipconfig                         Display IP configuration", "  ipconfig <ip> <mask> <gateway>   Set IP configuration", "  ipconfig /dhcp                   Get an address from DHCP", "  ipconfig /release                Release the DHCP address", "  ping <ip>                        Send echo request");
   }),
 ];
 
@@ -297,8 +690,10 @@ export const MODE_SPECS: Record<Mode, S[]> = {
   if: ifConfig,
   router: routerConfig,
   vlan: vlanConfig,
+  dhcp: dhcpConfig,
+  line: lineConfig,
   pc: pcCommands,
 };
 
 /** Sub-modes fall back to global config commands, like real IOS. */
-export const PARENT: Partial<Record<Mode, Mode>> = { if: "config", router: "config", vlan: "config" };
+export const PARENT: Partial<Record<Mode, Mode>> = { if: "config", router: "config", vlan: "config", dhcp: "config", line: "config" };

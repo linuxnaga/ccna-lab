@@ -48,8 +48,14 @@ export const COURSES: Course[] = [
     ],
     labs: [
       { id: "router-interface", title: "Branch Router Bring-up", domain: "Network Fundamentals & Subnetting", free: true, xp: 150 },
+      { id: "subnet-vlsm", title: "Carve Up the /24", domain: "Network Fundamentals & Subnetting", free: false, xp: 200 },
       { id: "vlan-access", title: "Sales VLAN Cannot Reach the Gateway", domain: "Switching, VLANs & STP", free: false, xp: 250 },
+      { id: "stp-root", title: "The Wrong Root Bridge", domain: "Switching, VLANs & STP", free: false, xp: 300 },
       { id: "static-ospf", title: "Two Sites, One Network", domain: "IP Routing (Static & OSPF)", free: false, xp: 350 },
+      { id: "floating-static", title: "Backup Link Failover", domain: "IP Routing (Static & OSPF)", free: false, xp: 400 },
+      { id: "dhcp-nat", title: "Branch Internet Edge", domain: "IP Services (NAT, DHCP, ACLs)", free: false, xp: 450 },
+      { id: "acl-hardening", title: "Lock Down the Server Farm", domain: "Security & Troubleshooting", free: false, xp: 500 },
+      { id: "troubleshoot", title: "Ticket #4471: Floor 3 Is Down", domain: "Security & Troubleshooting", free: false, xp: 600 },
     ],
   },
   {

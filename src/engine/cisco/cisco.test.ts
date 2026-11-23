@@ -90,7 +90,7 @@ describe("interfaces and routing", () => {
     const r = run(fresh(), "R1", ["en", "conf t", "int g0/0", "ip add 192.168.10.1 255.255.255.0", "no shut"]);
     expect(r.output.some((l) => l.includes("GigabitEthernet0/0, changed state to up"))).toBe(true);
     const link = topo.links[0];
-    expect(ciscoEngine.linkStatus(r.state, topo, link)).toEqual({ a: true, b: true });
+    expect(ciscoEngine.linkStatus(r.state, topo, link)).toMatchObject({ a: true, b: true });
     const brief = run(r.state, "R1", ["do sh ip int br"]).output.join("\n");
     expect(brief).toMatch(/GigabitEthernet0\/0\s+192\.168\.10\.1\s+YES manual up\s+up/);
   });

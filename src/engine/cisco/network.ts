@@ -1,6 +1,7 @@
 import type { TopologyLink } from "../types";
-import type { CiscoState, Device, Iface } from "./model";
+import type { CiscoState, Device, Iface, NatTranslation } from "./model";
 import { maskToPrefix, network, prefixToMask, sameSubnet, wildcardMatch } from "./ip";
+import { aclPermits, aclPermitsSource } from "./acl";
 
 /* ------------------------------------------------------------------ */
 /* Interface and link state                                            */
@@ -26,6 +27,8 @@ export function ifaceState(state: CiscoState, devId: string, ifName: string): If
   const iface = dev?.interfaces[ifName];
   if (!iface) return { status: "down", protocol: "down" };
   if (iface.shutdown) return { status: "administratively down", protocol: "down" };
+
+  if (ifName.startsWith("Loopback")) return { status: "up", protocol: "up" };
 
   if (ifName.startsWith("Vlan")) {
     const vlan = Number(ifName.slice(4));
@@ -252,7 +255,7 @@ export function routingTable(state: CiscoState, devId: string, uf = l2Domains(st
     const candidates: Route[] = [
       ...dev.staticRoutes
         .filter((s) => resolvable(s.nextHop))
-        .map((s): Route => ({ source: "S", net: s.net, mask: s.mask, ad: 1, metric: 0, nextHop: s.nextHop })),
+        .map((s): Route => ({ source: "S", net: s.net, mask: s.mask, ad: s.ad ?? 1, metric: 0, nextHop: s.nextHop })),
       ...ospfRoutes(state, dev, uf),
     ];
     // For each prefix keep only the lowest administrative distance.
@@ -282,29 +285,73 @@ function lookup(routes: Route[], dst: number): Route | undefined {
 }
 
 /* ------------------------------------------------------------------ */
-/* Packet delivery (ping)                                              */
+/* Packet delivery (ping), with ACLs and NAT                           */
 /* ------------------------------------------------------------------ */
 
 export type DeliveryResult =
-  | { ok: true; hops: string[]; srcIp: number }
-  | { ok: false; reason: "no-route" | "timeout"; at: string };
+  | { ok: true; hops: string[]; src: number; dst: number }
+  | { ok: false; reason: "no-route" | "timeout" | "filtered"; at: string };
 
-function ownerOf(state: CiscoState, ip: number): string | undefined {
+/** NAT flows created while a ping is in flight: "router|insideGlobal" -> insideLocal. */
+export type Flows = Map<string, number>;
+
+/** Who answers for an IP on a segment: a real interface, or a router publishing a static NAT global. */
+function ownerOf(state: CiscoState, ip: number): { dev: string; iface: string } | undefined {
   for (const dev of Object.values(state.devices)) {
-    for (const i of upL3Ifaces(state, dev)) if (i.ip === ip) return dev.id;
+    for (const i of upL3Ifaces(state, dev)) if (i.ip === ip) return { dev: dev.id, iface: i.iface };
+  }
+  for (const dev of Object.values(state.devices)) {
+    if (dev.kind !== "router" || !dev.nat.rules.some((r) => r.kind === "static" && r.global === ip)) continue;
+    const out = upL3Ifaces(state, dev).find((i) => dev.interfaces[i.iface].nat === "outside" && sameSubnet(i.ip, ip, i.mask));
+    if (out) return { dev: dev.id, iface: out.iface };
   }
   return undefined;
 }
 
-/** One-way delivery from a device to an IP, following each hop's routing table. */
-export function deliver(state: CiscoState, fromId: string, dst: number, uf = l2Domains(state)): DeliveryResult {
+/** Inside-to-outside source translation, or undefined when no rule applies. */
+function natOutbound(state: CiscoState, dev: Device, src: number): number | undefined {
+  for (const r of dev.nat.rules) if (r.kind === "static" && r.local === src) return r.global;
+  for (const r of dev.nat.rules) {
+    if (r.kind !== "overload" || !aclPermitsSource(dev, r.acl, src)) continue;
+    const i = dev.interfaces[r.iface];
+    if (i?.ip !== undefined && ifaceState(state, dev.id, r.iface).protocol === "up") return i.ip;
+  }
+  return undefined;
+}
+
+/**
+ * One-way delivery from a device to an IP, following each hop's routing
+ * table. At each router: inbound ACL, outside->inside NAT, routing,
+ * inside->outside NAT, outbound ACL (the IOS order of operations).
+ */
+export function deliver(
+  state: CiscoState,
+  fromId: string,
+  dstIn: number,
+  uf = l2Domains(state),
+  opts: { src?: number; flows?: Flows } = {},
+): DeliveryResult {
+  const flows = opts.flows ?? new Map();
   let cur = fromId;
-  let srcIp: number | undefined;
+  let src = opts.src;
+  let dst = dstIn;
+  let ingress: string | undefined;
   const hops = [cur];
   for (let ttl = 0; ttl < 16; ttl++) {
     const dev = state.devices[cur];
-    if (upL3Ifaces(state, dev).some((i) => i.ip === dst)) return { ok: true, hops, srcIp: srcIp ?? dst };
-    if (cur !== fromId && dev.kind !== "router") return { ok: false, reason: "timeout", at: cur };
+    const isRouter = dev.kind === "router";
+    if (ingress && isRouter) {
+      const inIf = dev.interfaces[ingress];
+      if (!aclPermits(dev, inIf.acl?.in, { src: src!, dst, proto: "icmp" })) return { ok: false, reason: "filtered", at: cur };
+      if (inIf.nat === "outside") {
+        const flow = flows.get(`${cur}|${dst}`);
+        const stat = dev.nat.rules.find((r) => r.kind === "static" && r.global === dst);
+        if (flow !== undefined) dst = flow;
+        else if (stat?.kind === "static") dst = stat.local;
+      }
+    }
+    if (upL3Ifaces(state, dev).some((i) => i.ip === dst)) return { ok: true, hops, src: src ?? dst, dst };
+    if (cur !== fromId && !isRouter) return { ok: false, reason: "timeout", at: cur };
 
     const routes = routingTable(state, cur, uf);
     const route = lookup(routes, dst);
@@ -318,29 +365,97 @@ export function deliver(state: CiscoState, fromId: string, dst: number, uf = l2D
       egress = conn.iface!;
     }
     if (route.source === "C") nextHop = dst;
-    if (srcIp === undefined) srcIp = dev.interfaces[egress!].ip;
+    if (src === undefined) src = dev.interfaces[egress!].ip!;
+
+    if (isRouter && ingress && dev.interfaces[ingress].nat === "inside" && dev.interfaces[egress!].nat === "outside") {
+      const global = natOutbound(state, dev, src);
+      if (global !== undefined) {
+        flows.set(`${cur}|${global}`, src);
+        flows.set(`xlate|${cur}|${src}|${global}|${dst}`, 1);
+        src = global;
+      }
+    }
+    if (isRouter && ingress && !aclPermits(dev, dev.interfaces[egress!].acl?.out, { src, dst, proto: "icmp" })) {
+      return { ok: false, reason: "filtered", at: cur };
+    }
 
     const owner = ownerOf(state, nextHop);
     if (!owner) return { ok: false, reason: "timeout", at: cur };
-    const ownerIf = upL3Ifaces(state, state.devices[owner]).find((i) => i.ip === nextHop)!;
-    if (uf.find(l3Key(cur, egress!)) !== uf.find(l3Key(owner, ownerIf.iface))) {
+    if (uf.find(l3Key(cur, egress!)) !== uf.find(l3Key(owner.dev, owner.iface))) {
       return { ok: false, reason: "timeout", at: cur };
     }
-    cur = owner;
+    ingress = owner.iface;
+    cur = owner.dev;
     hops.push(cur);
   }
   return { ok: false, reason: "timeout", at: cur };
 }
 
+export interface PingResult {
+  ok: boolean;
+  /** "U" in IOS output: no route, or administratively prohibited by an ACL. */
+  unreachable: boolean;
+  /** NAT translations the echo created, per router. */
+  translations: { router: string; t: NatTranslation }[];
+}
+
 /** Round-trip reachability, as ping sees it. */
-export function ping(state: CiscoState, fromId: string, dst: number): { ok: boolean; unreachable: boolean } {
+export function ping(state: CiscoState, fromId: string, dst: number): PingResult {
   const uf = l2Domains(state);
-  const there = deliver(state, fromId, dst, uf);
-  if (!there.ok) return { ok: false, unreachable: there.reason === "no-route" };
+  const flows: Flows = new Map();
+  const there = deliver(state, fromId, dst, uf, { flows });
+  const translations = () =>
+    [...flows.keys()]
+      .filter((k) => k.startsWith("xlate|"))
+      .map((k) => {
+        const [, router, local, global, outside] = k.split("|");
+        return { router, t: { proto: "icmp" as const, insideLocal: +local, insideGlobal: +global, outside: +outside } };
+      });
+  if (!there.ok) return { ok: false, unreachable: there.reason !== "timeout", translations: [] };
   const owner = there.hops[there.hops.length - 1];
-  if (owner === fromId) return { ok: true, unreachable: false };
-  const back = deliver(state, owner, there.srcIp, uf);
-  return { ok: back.ok, unreachable: false };
+  if (owner === fromId) return { ok: true, unreachable: false, translations: [] };
+  const back = deliver(state, owner, there.src, uf, { src: there.dst, flows });
+  return { ok: back.ok, unreachable: !back.ok && back.reason !== "timeout", translations: back.ok ? translations() : [] };
+}
+
+/* ------------------------------------------------------------------ */
+/* DHCP                                                                */
+/* ------------------------------------------------------------------ */
+
+export interface DhcpLease {
+  server: string;
+  ip: number;
+  mask: number;
+  gateway?: number;
+  dns?: number;
+}
+
+/** Find a DHCP server on the client's broadcast domain and pick the lowest free address. */
+export function dhcpOffer(state: CiscoState, clientId: string, clientIf = "Ethernet0"): DhcpLease | null {
+  if (!physicalUp(state, clientId, clientIf)) return null;
+  const uf = l2Domains(state);
+  const me = uf.find(l3Key(clientId, clientIf));
+  const used = new Set<number>();
+  for (const d of Object.values(state.devices)) {
+    if (d.id === clientId) continue;
+    for (const i of Object.values(d.interfaces)) if (i.ip !== undefined) used.add(i.ip);
+  }
+  for (const dev of Object.values(state.devices)) {
+    if (dev.kind !== "router") continue;
+    for (const i of upL3Ifaces(state, dev)) {
+      if (uf.find(l3Key(dev.id, i.iface)) !== me) continue;
+      const pool = Object.values(dev.dhcp.pools).find((p) => p.net !== undefined && p.mask !== undefined && sameSubnet(i.ip, p.net, p.mask));
+      if (!pool) continue;
+      const net = network(pool.net!, pool.mask!);
+      const bcast = (net | (~pool.mask! >>> 0)) >>> 0;
+      for (let a = net + 1; a < bcast; a++) {
+        if (used.has(a) || dev.dhcp.excluded.some(([lo, hi]) => a >= lo && a <= hi)) continue;
+        return { server: dev.id, ip: a, mask: pool.mask!, gateway: pool.defaultRouter, dns: pool.dns };
+      }
+      return null;
+    }
+  }
+  return null;
 }
 
 export { prefixToMask };

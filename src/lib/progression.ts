@@ -1,10 +1,14 @@
 import type { Course } from "./courses";
 
-/** Labs unlock in order: the first is open, each next one needs the previous completed. */
+/**
+ * Labs unlock in order: the first is open, each next one needs the previous
+ * completed. A lab you already completed stays open, so inserting a new lab
+ * earlier in the path never locks a player out of finished work.
+ */
 export function isUnlocked(course: Course, labId: string, completed: Set<string>): boolean {
   const i = course.labs.findIndex((l) => l.id === labId);
   if (i <= 0) return i === 0;
-  return completed.has(course.labs[i - 1].id);
+  return completed.has(labId) || completed.has(course.labs[i - 1].id);
 }
 
 export interface Badge {

@@ -3,10 +3,13 @@ import { cloneDevice, makeDevice, type CiscoState, type Device, type Mode } from
 import { MODE_SPECS, PARENT, type Ctx } from "./commands";
 import { completeLine, match, nextOptions, type MatchResult, type Spec } from "./parser";
 import { ifaceState, l2Domains, ospfNeighbors } from "./network";
+import { portBlocked } from "./stp";
 import { formatIp } from "./ip";
 
 export * from "./model";
-export { ifaceState, ping, routingTable, ospfNeighbors } from "./network";
+export { deliver, dhcpOffer, ifaceState, ping, routingTable, ospfNeighbors } from "./network";
+export { spanningTree, spanningTreeAll, portBlocked } from "./stp";
+export { aclPermits } from "./acl";
 export { parseIp, formatIp } from "./ip";
 
 const SUFFIX: Record<Mode, string> = {
@@ -16,6 +19,8 @@ const SUFFIX: Record<Mode, string> = {
   if: "(config-if)#",
   router: "(config-router)#",
   vlan: "(config-vlan)#",
+  dhcp: "(dhcp-config)#",
+  line: "(config-line)#",
   pc: "",
 };
 
@@ -80,6 +85,7 @@ function run(state: CiscoState, devId: string, line: string): ExecResult<CiscoSt
     dev,
     out: [],
     ok: true,
+    effects: [],
     execIn: (mode, sub) => {
       const r = match(specsFor(dev, mode, ctx), sub, dev);
       if (r.kind === "ok") r.spec.run(ctx, r.args);
@@ -128,7 +134,20 @@ function run(state: CiscoState, devId: string, line: string): ExecResult<CiscoSt
   const wasMode = state.devices[devId].mode;
   r.spec.run(ctx, r.args);
   if (ctx.ok && !["user", "priv", "pc"].includes(wasMode)) dev.saved = false;
-  const next: CiscoState = { ...state, devices: { ...state.devices, [devId]: dev }, rev: state.rev + 1 };
+  const devices = { ...state.devices, [devId]: dev };
+  if (ctx.ok) {
+    for (const fx of ctx.effects) {
+      // Effects may touch other devices: clone each one before it is mutated.
+      const touched = new Proxy(devices, {
+        get(target, key: string) {
+          if (key !== devId && target[key] === state.devices[key]) target[key] = cloneDevice(state.devices[key]);
+          return target[key];
+        },
+      });
+      fx(touched);
+    }
+  }
+  const next: CiscoState = { ...state, devices, rev: state.rev + 1 };
   const logs = ctx.ok ? linkLogs(state, next, devId) : [];
   return { state: next, output: [...ctx.out, ...logs], ok: ctx.ok, canonical: r.canonical };
 }
@@ -139,21 +158,26 @@ export const ciscoEngine: VendorEngine<CiscoState> = {
   exec: run,
   complete(state, id, line) {
     const dev = state.devices[id];
-    const ctx = { state, dev, out: [], ok: true, execIn: () => {} } as Ctx;
+    const ctx = { state, dev, out: [], ok: true, effects: [], execIn: () => {} } as Ctx;
     const own = completeLine(specsFor(dev, dev.mode, ctx), line, dev);
     if (own !== line) return own;
     const parent = PARENT[dev.mode];
     return parent ? completeLine(specsFor(dev, parent, ctx), line, dev) : line;
   },
   linkStatus(state: CiscoState, _t: Topology, link: TopologyLink) {
+    const a = ifaceState(state, link.a.device, link.a.port).protocol === "up";
+    const b = ifaceState(state, link.b.device, link.b.port).protocol === "up";
     return {
-      a: ifaceState(state, link.a.device, link.a.port).protocol === "up",
-      b: ifaceState(state, link.b.device, link.b.port).protocol === "up",
+      a,
+      b,
+      aBlocked: a && b && portBlocked(state, link.a.device, link.a.port),
+      bBlocked: a && b && portBlocked(state, link.b.device, link.b.port),
     };
   },
   banner(state, id) {
     const dev = state.devices[id];
     if (dev.kind === "pc") return ["PC Command Line 1.0", "Type 'help' for available commands.", ""];
-    return [`${dev.hostname} con0 is now available`, "", "Press RETURN to get started.", ""];
+    const motd = dev.security.banner ? [dev.security.banner, ""] : [];
+    return [`${dev.hostname} con0 is now available`, "", "Press RETURN to get started.", "", ...motd];
   },
 };

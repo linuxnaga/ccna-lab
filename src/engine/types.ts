@@ -47,6 +47,9 @@ export interface LinkStatus {
   /** Physical/line-protocol state of each end. */
   a: boolean;
   b: boolean;
+  /** Spanning tree has this end in blocking (alternate) state. */
+  aBlocked?: boolean;
+  bBlocked?: boolean;
 }
 
 export interface VendorEngine<S> {
