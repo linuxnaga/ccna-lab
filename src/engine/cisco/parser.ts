@@ -65,6 +65,9 @@ export function matchIface(tokens: Token[], i: number, dev: Device): [string, nu
   if (type.full === "Vlan" && dev.kind === "switch" && /^\d+$/.test(num) && +num >= 1 && +num <= 4094) {
     return [name, consumed];
   }
+  if (type.full === "Loopback" && dev.kind === "router" && /^\d+$/.test(num) && +num <= 2147483647) {
+    return [name, consumed];
+  }
   return null;
 }
 

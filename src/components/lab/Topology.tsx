@@ -27,6 +27,14 @@ function DeviceIcon({ d, active }: { d: TopologyDevice; active: boolean }) {
           <path d="M-22 -6 L22 -6 M16 -11 L22 -6 L16 -1 M22 6 L-22 6 M-16 1 L-22 6 L-16 11" stroke={stroke} strokeWidth={2.2} fill="none" strokeLinecap="round" strokeLinejoin="round" />
         </g>
       );
+    case "server":
+      return (
+        <g>
+          <rect x={-18} y={-28} width={36} height={56} rx={4} fill={fill} stroke={stroke} strokeWidth={2.5} />
+          <path d="M-10 -16 L10 -16 M-10 -6 L10 -6 M-10 4 L10 4" stroke={stroke} strokeWidth={2.2} strokeLinecap="round" />
+          <circle cx={0} cy={17} r={3} fill={stroke} />
+        </g>
+      );
     default:
       return (
         <g>
@@ -37,7 +45,11 @@ function DeviceIcon({ d, active }: { d: TopologyDevice; active: boolean }) {
   }
 }
 
-const labelPos = (d: TopologyDevice) => d.labelPos ?? (d.kind === "pc" ? "below" : "left");
+/** Green: forwarding. Amber: up but spanning tree is blocking. Red: down. */
+const light = (up: boolean, blocked?: boolean) => (!up ? "#f43f5e" : blocked ? "#f59e0b" : "#10b981");
+const lightTitle = (up: boolean, blocked?: boolean) => (!up ? "down" : blocked ? "up, STP blocking" : "up");
+
+const labelPos = (d: TopologyDevice) => d.labelPos ?? (d.kind === "pc" || d.kind === "server" ? "below" : "left");
 
 export function TopologyView({
   topology,
@@ -80,8 +92,8 @@ export function TopologyView({
             <line x1={a.x} y1={a.y} x2={b.x} y2={b.y} stroke={up ? "#10b981" : "#475569"} strokeWidth={3} strokeDasharray={up ? undefined : "8 6"} filter={up ? "url(#glow)" : undefined}>
               {up && <animate attributeName="stroke-opacity" values="1;0.6;1" dur="2s" repeatCount="indefinite" />}
             </line>
-            <circle cx={pa.x} cy={pa.y} r={7} fill={st.a ? "#10b981" : "#f43f5e"} filter="url(#glow)" />
-            <circle cx={pb.x} cy={pb.y} r={7} fill={st.b ? "#10b981" : "#f43f5e"} filter="url(#glow)" />
+            <circle cx={pa.x} cy={pa.y} r={7} fill={light(st.a, st.aBlocked)} filter="url(#glow)"><title>{lightTitle(st.a, st.aBlocked)}</title></circle>
+            <circle cx={pb.x} cy={pb.y} r={7} fill={light(st.b, st.bBlocked)} filter="url(#glow)"><title>{lightTitle(st.b, st.bBlocked)}</title></circle>
             <text x={la.x} y={la.y} fill="#94a3b8" fontSize={15} fontFamily="monospace" textAnchor="middle">{short(l.a.port)}</text>
             <text x={lb.x} y={lb.y} fill="#94a3b8" fontSize={15} fontFamily="monospace" textAnchor="middle">{short(l.b.port)}</text>
           </g>
@@ -102,7 +114,7 @@ export function TopologyView({
           <DeviceIcon d={d} active={d.id === active} />
           <text
             x={labelPos(d) === "left" ? (d.kind === "switch" ? -48 : -42) : 0}
-            y={labelPos(d) === "below" ? 40 : labelPos(d) === "above" ? -42 : 6}
+            y={labelPos(d) === "below" ? (d.kind === "server" ? 50 : 40) : labelPos(d) === "above" ? -42 : 6}
             fill={d.id === active ? "#67e8f9" : "#e2e8f0"}
             fontSize={18}
             fontWeight={600}
