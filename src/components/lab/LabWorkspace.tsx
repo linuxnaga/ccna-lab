@@ -2,13 +2,15 @@
 
 import Link from "next/link";
 import { useEffect, useMemo, useReducer, useState } from "react";
-import { CheckSquare, Square, LifeBuoy, RotateCcw, Trophy, X, BookOpen } from "lucide-react";
+import { CheckSquare, Square, LifeBuoy, RotateCcw, Trophy, X, BookOpen, Compass } from "lucide-react";
 import { getLabDefinition } from "@/labs";
 import type { LabDefinition } from "@/engine/types";
 import { HINT_COST, getCourse } from "@/lib/courses";
 import { domainBadges } from "@/lib/progression";
 import { Hud } from "@/components/Hud";
+import { getLabGuide } from "@/labs/guides";
 import { CheatSheet } from "./CheatSheet";
+import { LabGuide } from "./LabGuide";
 import { TopologyView } from "./Topology";
 import { Terminal, type TermLine } from "./Terminal";
 
@@ -106,6 +108,7 @@ function Workspace({ lab, courseId, player }: { lab: Lab; courseId: string; play
   const [award, setAward] = useState<{ awarded: number } | { error: string } | null>(null);
   const [briefingOpen, setBriefingOpen] = useState(true);
   const [cheatOpen, setCheatOpen] = useState(false);
+  const [guideOpen, setGuideOpen] = useState(false);
   const [focusTick, setFocusTick] = useState(0);
 
   const status = useMemo(
@@ -139,6 +142,11 @@ function Workspace({ lab, courseId, player }: { lab: Lab; courseId: string; play
   const badges = course ? domainBadges(course, completedSet) : [];
   const activeLabel = lab.topology.devices.find((d) => d.id === s.active)?.label ?? s.active;
 
+  function openDevice(d: string) {
+    dispatch({ type: "select", device: d });
+    setFocusTick((t) => t + 1);
+  }
+
   function reset() {
     dispatch({ type: "reset" });
     setAward(null);
@@ -153,6 +161,9 @@ function Workspace({ lab, courseId, player }: { lab: Lab; courseId: string; play
           <h1 className="text-xl font-semibold text-white">{lab.title}</h1>
         </div>
         <div className="flex items-center gap-2">
+          <button onClick={() => setGuideOpen(true)} className="flex items-center gap-1.5 rounded-md border border-slate-700 px-3 py-1.5 text-sm text-slate-300 hover:border-cyan-400 hover:text-cyan-200">
+            <Compass className="h-4 w-4" /> Lab Guide
+          </button>
           <button onClick={() => setCheatOpen(true)} className="flex items-center gap-1.5 rounded-md border border-slate-700 px-3 py-1.5 text-sm text-slate-300 hover:border-cyan-400 hover:text-cyan-200">
             <BookOpen className="h-4 w-4" /> Cheat Sheet
           </button>
@@ -168,6 +179,9 @@ function Workspace({ lab, courseId, player }: { lab: Lab; courseId: string; play
             <div>
               <p className="font-mono text-xs uppercase tracking-widest text-amber-300">Incident briefing</p>
               {lab.briefing.map((p, i) => <p key={i} className="mt-1.5 text-sm text-slate-300">{p}</p>)}
+              <p className="mt-2 text-sm text-slate-400">
+                Not sure where to start? Open the <button onClick={() => setGuideOpen(true)} className="text-cyan-300 underline-offset-2 hover:underline">Lab Guide</button> for a step-by-step walkthrough and what each device does.
+              </p>
             </div>
             <button onClick={() => setBriefingOpen(false)} aria-label="Dismiss briefing" className="text-slate-400 hover:text-white"><X className="h-4 w-4" /></button>
           </div>
@@ -177,10 +191,7 @@ function Workspace({ lab, courseId, player }: { lab: Lab; courseId: string; play
       <div className="mt-4 grid gap-4 lg:grid-cols-[minmax(0,5fr)_minmax(0,6fr)]">
         <div className="flex flex-col gap-4">
           <div className="aspect-[5/3] rounded-lg border border-slate-700 bg-slate-950/70">
-            <TopologyView topology={lab.topology} status={status} active={s.active} onSelect={(d) => {
-              dispatch({ type: "select", device: d });
-              setFocusTick((t) => t + 1);
-            }} />
+            <TopologyView topology={lab.topology} status={status} active={s.active} onSelect={openDevice} />
           </div>
           <div className="rounded-lg border border-slate-700 bg-slate-900/70 p-4">
             <h2 className="font-mono text-xs uppercase tracking-widest text-cyan-300">Objectives</h2>
@@ -221,6 +232,18 @@ function Workspace({ lab, courseId, player }: { lab: Lab; courseId: string; play
       </div>
 
       {cheatOpen && <CheatSheet onClose={() => setCheatOpen(false)} />}
+      {guideOpen && (
+        <LabGuide
+          guide={getLabGuide(lab.courseId, lab.labId)}
+          topology={lab.topology}
+          startDevice={lab.startDevice}
+          onClose={() => setGuideOpen(false)}
+          onOpenDevice={(d) => {
+            setGuideOpen(false);
+            openDevice(d);
+          }}
+        />
+      )}
 
       {s.showVictory && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/80 p-4 backdrop-blur-sm">
