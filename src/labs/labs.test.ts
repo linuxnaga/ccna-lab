@@ -95,6 +95,45 @@ const SOLUTIONS: Record<string, [string, string[]][]> = {
       "interface range fa0/4 - 24", "switchport mode access", "switchport access vlan 999", "shutdown", "end",
     ]],
   ],
+  "ccna/trunk-security": [
+    ["SW1", ["en", "conf t", "vlan 999", "name NATIVE-BH", "exit", "int g0/1", "switchport mode trunk", "switchport nonegotiate", "switchport trunk native vlan 999", "switchport trunk allowed vlan 10,20,999", "end"]],
+    ["SW2", ["en", "show interfaces g0/1 switchport", "conf t", "vlan 999", "name NATIVE-BH", "exit", "int g0/1", "sw mode trunk", "sw nonegotiate", "sw trunk native vlan 999", "sw trunk allowed vlan 10,20,999", "end", "show interfaces trunk"]],
+    ["PC1", ["ping 192.168.10.12"]],
+  ],
+  "ccna/ospf-dr": [
+    ["R2", ["en", "show ip ospf neighbor", "conf t", "router ospf 1", "passive-interface g0/1", "end"]],
+    ["R1", ["en", "conf t", "int g0/0", "ip ospf priority 255", "exit", "router ospf 1", "default-information originate", "end"]],
+    ["R3", ["en", "conf t", "int g0/0", "ip ospf priority 0", "exit", "router ospf 1", "passive-interface g0/1", "end", "clear ip ospf process", "show ip ospf interface g0/0", "show ip route"]],
+    ["PC3", ["ping 8.8.8.8"]],
+  ],
+  "ccna/dhcp-relay": [
+    ["R2", ["en", "conf t", "ip dhcp excluded-address 192.168.20.1 192.168.20.10", "ip dhcp pool BRANCH", "network 192.168.20.0 255.255.255.0", "default-router 192.168.20.1", "dns-server 192.168.10.53", "exit", "ip route 192.168.20.0 255.255.255.0 10.0.12.1", "end"]],
+    ["R1", ["en", "conf t", "int g0/0", "ip helper-address 10.0.12.2", "end"]],
+    ["PC1", ["ipconfig /dhcp", "ping 192.168.10.50"]],
+    ["PC2", ["ipconfig /dhcp"]],
+    ["R2", ["show ip dhcp binding"]],
+  ],
+  "ccna/device-mgmt": [
+    ["R1", [
+      "en", "show cdp neighbors", "show cdp neighbors detail", "conf t",
+      "int g0/0", "description to BR-ACC-07 Gi0/1", "int g0/1", "no cdp enable", "exit",
+      "ntp server 10.10.10.50", "clock timezone EST -5",
+      "logging host 10.10.10.50", "logging trap warnings", "service timestamps log datetime msec",
+      "no snmp-server community public", "snmp-server community N0c-R3ad ro", "lldp run", "end",
+    ]],
+    ["SW1", ["en", "conf t", "ntp server 10.10.10.50", "lldp run", "end", "show ntp status", "show lldp neighbors"]],
+    ["R1", ["show ntp associations", "show logging", "show clock", "show snmp community"]],
+  ],
+  "ccna/named-acl": [
+    ["R1", [
+      "en", "show access-lists", "conf t", "ip access-list extended DMZ-IN", "no 20",
+      "15 permit tcp any host 172.16.1.10 eq 443", "25 permit icmp host 198.51.100.50 host 172.16.1.10", "exit",
+      "ip access-list extended STAFF-IN", "deny tcp 192.168.10.0 0.0.0.255 host 172.16.1.10 eq telnet", "permit ip any any", "exit",
+      "int g0/0", "ip access-group STAFF-IN in", "end",
+    ]],
+    ["NET", ["curl https://172.16.1.10", "ping 172.16.1.10"]],
+    ["PC1", ["ssh -l admin 172.16.1.10"]],
+  ],
   "ccna/static-ospf": [
     ["R2", ["en", "conf t", "int g0/0", "ip add 192.168.20.1 255.255.255.0", "no shut", "int g0/1", "ip add 10.0.0.2 255.255.255.252", "no shut", "router ospf 1", "router-id 2.2.2.2", "network 10.0.0.0 0.0.0.3 area 0", "network 192.168.20.0 0.0.0.255 area 0", "end"]],
     ["R1", ["en", "conf t", "int g0/1", "no shut", "router ospf 1", "router-id 1.1.1.1", "net 10.0.0.0 0.0.0.3 area 0", "net 192.168.10.0 0.0.0.255 area 0", "end"]],

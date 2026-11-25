@@ -4,7 +4,7 @@
  * root ports, designated ports and alternate (blocking) ports.
  */
 import type { CiscoState, Device } from "./model";
-import { findLink, logicalPort, physicalUp } from "./network";
+import { carriesVlan, findLink, isTrunking, logicalPort, physicalUp, untaggedVlan } from "./network";
 
 const ifaceOrder = (a: string, b: string) => a.localeCompare(b, undefined, { numeric: true });
 
@@ -56,18 +56,6 @@ export function bridgeId(dev: Device, vlan: number): BridgeId {
   return { priority: (dev.stp.priority[vlan] ?? DEFAULT_PRIORITY) + vlan, mac: dev.mac };
 }
 
-/** Does this switch port forward frames for the VLAN? */
-function carries(dev: Device, iface: string, vlan: number): boolean {
-  const i = dev.interfaces[iface];
-  if (!i?.switchport || !(vlan in dev.vlans)) return false;
-  return i.switchport.mode === "trunk" || i.switchport.accessVlan === vlan;
-}
-
-function untagged(dev: Device, iface: string): number | null {
-  const sp = dev.interfaces[iface].switchport!;
-  return sp.mode === "trunk" ? 1 : sp.accessVlan;
-}
-
 interface Edge {
   dev: string;
   iface: string;
@@ -91,14 +79,14 @@ function vlanEdges(state: CiscoState, vlan: number): Edge[] {
   for (const dev of Object.values(state.devices)) {
     if (dev.kind !== "switch") continue;
     for (const [phys, iface] of logicalUpPorts(state, dev)) {
-      if (!carries(dev, iface, vlan)) continue;
+      if (!carriesVlan(state, dev.id, iface, vlan)) continue;
       const l = findLink(state, dev.id, phys);
       const peer = l && state.devices[l.peer.device];
       if (!l || !peer || peer.kind !== "switch") continue;
       const peerIface = logicalPort(state, peer.id, l.peer.port);
-      if (!carries(peer, peerIface, vlan)) continue;
-      const bothTrunk = dev.interfaces[iface].switchport!.mode === "trunk" && peer.interfaces[peerIface].switchport!.mode === "trunk";
-      if (!bothTrunk && untagged(dev, iface) !== untagged(peer, peerIface)) continue;
+      if (!carriesVlan(state, peer.id, peerIface, vlan)) continue;
+      const bothTrunk = isTrunking(state, dev.id, iface) && isTrunking(state, peer.id, peerIface);
+      if (!bothTrunk && untaggedVlan(state, dev.id, iface) !== untaggedVlan(state, peer.id, peerIface)) continue;
       edges.set(`${dev.id}|${iface}`, { dev: dev.id, iface, peer: peer.id, peerIface });
     }
   }
@@ -163,7 +151,7 @@ export function spanningTreeAll(state: CiscoState, vlan: number): Record<string,
     const edgeByIface = new Map((adj.get(d.id) ?? []).map((e) => [e.iface, e]));
     const logical = [...new Set(logicalUpPorts(state, d).values())].sort(ifaceOrder);
     for (const iface of logical) {
-      if (!carries(d, iface, vlan)) continue;
+      if (!carriesVlan(state, d.id, iface, vlan)) continue;
       const e = edgeByIface.get(iface);
       const sp = d.interfaces[iface].switchport!;
       const base = { iface, cost: portCost(iface, d), portId: portNumber(iface), edge: !!sp.portfast };
@@ -206,7 +194,7 @@ function userVlans(state: CiscoState): Set<number> {
   for (const d of Object.values(state.devices)) {
     if (d.kind !== "switch") continue;
     for (const i of Object.values(d.interfaces)) {
-      if (i.switchport && i.switchport.mode !== "trunk" && i.switchport.accessVlan in d.vlans && physicalUp(state, d.id, i.name)) {
+      if (i.switchport && !isTrunking(state, d.id, i.name) && i.switchport.accessVlan in d.vlans && physicalUp(state, d.id, i.name)) {
         const l = findLink(state, d.id, i.name);
         if (l && state.devices[l.peer.device]?.kind !== "switch") out.add(i.switchport.accessVlan);
       }

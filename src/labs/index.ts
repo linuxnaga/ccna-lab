@@ -13,6 +13,11 @@ import { etherchannelLab } from "./ccna/etherchannel";
 import { ipv6RoutingLab } from "./ccna/ipv6-routing";
 import { hsrpLab } from "./ccna/hsrp";
 import { portSecurityLab } from "./ccna/port-security";
+import { trunkSecurityLab } from "./ccna/trunk-security";
+import { ospfDrLab } from "./ccna/ospf-dr";
+import { dhcpRelayLab } from "./ccna/dhcp-relay";
+import { deviceMgmtLab } from "./ccna/device-mgmt";
+import { namedAclLab } from "./ccna/named-acl";
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type AnyLab = LabDefinition<any>;
@@ -25,13 +30,18 @@ export const LABS: Record<string, AnyLab> = {
   "ccna/inter-vlan": interVlanLab,
   "ccna/stp-root": stpRootLab,
   "ccna/etherchannel": etherchannelLab,
+  "ccna/trunk-security": trunkSecurityLab,
   "ccna/static-ospf": staticOspfLab,
+  "ccna/ospf-dr": ospfDrLab,
   "ccna/floating-static": floatingStaticLab,
   "ccna/ipv6-routing": ipv6RoutingLab,
   "ccna/hsrp": hsrpLab,
   "ccna/dhcp-nat": dhcpNatLab,
+  "ccna/dhcp-relay": dhcpRelayLab,
+  "ccna/device-mgmt": deviceMgmtLab,
   "ccna/port-security": portSecurityLab,
   "ccna/acl-hardening": aclHardeningLab,
+  "ccna/named-acl": namedAclLab,
   "ccna/troubleshoot": troubleshootLab,
 };
 

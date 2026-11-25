@@ -129,7 +129,9 @@ describe("progression", () => {
     expect(isUnlocked(ccna, "vlan-access", done)).toBe(true);
     expect(isUnlocked(ccna, "inter-vlan", done)).toBe(true);
     expect(isUnlocked(ccna, "stp-root", done)).toBe(false);
-    expect(isUnlocked(ccna, "floating-static", done)).toBe(true);
+    // ospf-dr was inserted right after static-ospf, so it is the next mission now.
+    expect(isUnlocked(ccna, "ospf-dr", done)).toBe(true);
+    expect(isUnlocked(ccna, "floating-static", done)).toBe(false);
     expect(isUnlocked(ccna, "dhcp-nat", done)).toBe(false);
   });
 });
