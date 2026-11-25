@@ -40,7 +40,8 @@ src/
     cisco/                    Cisco IOS emulator (parser, modes, show, ping, OSPF, STP, DTP, ACLs, NAT, DHCP, HSRP, IPv6, NTP/CDP/LLDP)
   labs/
     ccna/*.ts                 Lab definitions: topology, start state, objectives, hints
-  components/lab/             Topology SVG, terminal, workspace, cheat sheet
+    guides.ts                 Lab Guide walkthroughs, device roles, UI glossary
+  components/lab/             Topology SVG, terminal, workspace, cheat sheet, lab guide
   lib/
     courses.ts                Course + lab catalog (add new vendors here)
     progression.ts            Mission unlock order and domain badges
@@ -117,17 +118,61 @@ Import the GitHub repo in Vercel, add the same environment variables (with `NEXT
 
 Labs unlock in order. A lab a player already completed stays open even if a new lab is inserted before it.
 
+## Running a lab
+
+1. Sign in and open the **dashboard**. Pick the next open mission on the mission map; missions unlock in order.
+2. Read the **incident briefing** at the top of the lab, then open **Lab Guide** for that lab's step-by-step walkthrough.
+3. **Click a device** on the topology to open its console. Network gear starts at the `>` prompt: `enable` (`en`) gets you to `#`, `configure terminal` (`conf t`) to `(config)#`, and from there `interface g0/0`, `router ospf 1`, `vlan 10`, `ip dhcp pool X`, `line vty 0 4` or `ip access-list extended X` enter their sub-modes. `exit` goes up one level, `end` (or Ctrl+Z) back to `#`. PCs have no modes: use `ipconfig`, `ipconfig /dhcp`, `ping`, `curl`, `telnet` and `ssh`.
+4. **Verify** with `show` commands and `ping`. Objectives tick themselves off as soon as the network is right, in any order.
+5. Tick every objective to see the victory screen, earn XP and unlock the next mission. Stuck? **Request Tier-2 Support** reveals the next hint (with exact commands) for a small XP cost. **Reset Lab** starts over.
+
+Per-lab walkthroughs (devices, ports, roles and steps for all 19 labs) are in [docs/LABS.md](docs/LABS.md), which mirrors `src/labs/guides.ts`.
+
+## What each component does
+
+### In the network
+
+| Component | What it does |
+| --- | --- |
+| Router | Layer 3: routes packets between IP networks using connected, static and OSPF routes. Each interface is its own subnet. Ports start shut down. |
+| Switch | Layer 2: forwards frames inside a VLAN by MAC address. Access ports carry one VLAN, trunks carry many with 802.1Q tags. Ports start enabled in VLAN 1. |
+| PC | End host: set or lease an address with `ipconfig`, test with `ping`, `curl`, `telnet`, `ssh`. |
+| Server | End host offering a service (file, web, NTP/syslog). Usually a test target. |
+| Gi0/x (GigabitEthernet) | 1 Gbit/s router ports and switch uplinks. `Gi0/0.10` is a subinterface for VLAN 10. |
+| Fa0/x (FastEthernet) | 100 Mbit/s switch access ports for PCs. |
+| Eth0 | A PC's or server's network card. |
+| Vlan10 (SVI) | A switch's virtual interface, used for its management address. |
+| Po1 (Port-channel) | An EtherChannel bundle of physical links acting as one. |
+| Link lights | Green: up and forwarding. Amber: up but blocked by spanning tree. Red: down. A dashed grey line is not up at both ends. |
+
+### In the app
+
+| Part | What it does |
+| --- | --- |
+| HUD | Rank and level, XP bar to the next rank, streak of consecutive valid commands, one badge per exam domain. |
+| Mission map | Dashboard skill tree of the five CCNA domains and their missions. Crown = Pro, lock = finish the previous mission. |
+| How to run a lab | Collapsible dashboard panel with the play loop and this table. |
+| Incident briefing | The scenario and what done looks like. |
+| Topology panel | SVG network diagram; click a device to switch the console to it. |
+| CLI terminal | Simulated Cisco IOS: modes, abbreviations, Tab completion, `?` help, Up/Down history, IOS error messages. |
+| Objectives | Live checklist driven by the simulated network state. |
+| Request Tier-2 Support | Progressive hints, each costing XP. |
+| Lab Guide | Per-lab walkthrough, device roles and ports, IOS modes, and this workspace glossary. |
+| Cheat Sheet | Command quick reference by topic. |
+| Reset Lab | Restores the starting config. |
+| Victory screen | XP earned, best streak, commands used, link to the next mission. |
+
 ## Tests
 
 ```bash
 npm test
 ```
 
-Engine tests cover parsing, modes, error messages, VLANs, DTP and trunk settings, STP, EtherChannel, port security, router-on-a-stick, static and floating static routes, OSPF (including DR election), HSRP, IPv6, standard, extended and named ACLs, NAT, DHCP and DHCP relay, NTP, CDP and LLDP. Every lab is also played with a reference solution, which must complete all objectives without a CLI error.
+Engine tests cover parsing, modes, error messages, VLANs, DTP and trunk settings, STP, EtherChannel, port security, router-on-a-stick, static and floating static routes, OSPF (including DR election), HSRP, IPv6, standard, extended and named ACLs, NAT, DHCP and DHCP relay, NTP, CDP and LLDP. Every lab is also played with a reference solution, which must complete all objectives without a CLI error, and every Lab Guide step is checked against the topology, with its verify command run through the CLI.
 
 ## Adding a lab
 
-Create `src/labs/<course>/<lab>.ts` exporting a `LabDefinition`, register it in `src/labs/index.ts`, add it to the catalog in `src/lib/courses.ts`, and add its reference solution to `src/labs/labs.test.ts`.
+Create `src/labs/<course>/<lab>.ts` exporting a `LabDefinition`, register it in `src/labs/index.ts`, add its walkthrough and device roles to `src/labs/guides.ts`, add it to the catalog in `src/lib/courses.ts`, and add its reference solution to `src/labs/labs.test.ts`.
 
 ## Adding a new vendor course
 

@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { LABS } from "./index";
 import { COURSES } from "@/lib/courses";
+import { GUIDES } from "./guides";
 
 /** A known-good solution for each lab, typed the way a student would. */
 const SOLUTIONS: Record<string, [string, string[]][]> = {
@@ -170,6 +171,25 @@ for (const [key, lab] of Object.entries(LABS)) {
       }
       const open = lab.objectives.filter((o) => !o.check(s)).map((o) => o.text);
       expect(open).toEqual([]);
+    });
+
+    it("has a guide that matches its topology, with verify commands the CLI accepts", () => {
+      const guide = GUIDES[key];
+      expect(guide, key).toBeDefined();
+      const ids = lab.topology.devices.map((d) => d.id);
+      expect(Object.keys(guide.roles).sort()).toEqual([...ids].sort());
+      expect(guide.steps.length).toBeGreaterThan(2);
+      let s = lab.initialState();
+      for (const [dev, lines] of SOLUTIONS[key]) for (const line of lines) s = lab.engine.exec(s, dev, line).state;
+      for (const st of guide.steps) {
+        expect(ids, st.task).toContain(st.device);
+        if (!st.verify || st.verify.includes("<")) continue;
+        // Verify commands run from # on network gear, or straight away on a PC.
+        let t = s;
+        if (st.mode !== "pc") for (const l of ["end", "enable"]) t = lab.engine.exec(t, st.device, l).state;
+        const r = lab.engine.exec(t, st.device, st.verify);
+        expect(r.ok, `${st.device}: ${st.verify}\n${r.output.join("\n")}`).toBe(true);
+      }
     });
 
     it("has a start device and hints", () => {

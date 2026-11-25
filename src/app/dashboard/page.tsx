@@ -7,6 +7,7 @@ import { getSubscription, isPro } from "@/lib/entitlements";
 import { domainBadges } from "@/lib/progression";
 import { Hud } from "@/components/Hud";
 import { SkillMap } from "@/components/SkillMap";
+import { HowItWorks } from "@/components/HowItWorks";
 import { StripeButton } from "@/components/StripeButton";
 import { paymentsMode } from "@/lib/billing";
 
@@ -64,6 +65,8 @@ export default async function Dashboard({ searchParams }: { searchParams: Promis
       <div className="mt-5">
         <Hud xp={profile?.xp ?? 0} badges={domainBadges(ccna, completedIn(ccna.id))} />
       </div>
+
+      <HowItWorks />
 
       <section className="mt-8 rounded-xl border border-slate-700 bg-slate-900/50 p-6">
         <p className="font-mono text-xs text-slate-400">{ccna.vendor} · {ccna.exam}</p>
