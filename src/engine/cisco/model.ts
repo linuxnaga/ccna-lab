@@ -1,6 +1,6 @@
 import type { Topology } from "../types";
 
-export type Mode = "user" | "priv" | "config" | "if" | "router" | "vlan" | "dhcp" | "line" | "pc";
+export type Mode = "user" | "priv" | "config" | "if" | "router" | "vlan" | "dhcp" | "line" | "nacl" | "pc";
 
 export interface Iface {
   /** Full name, e.g. "GigabitEthernet0/0", "FastEthernet0/1", "Vlan1". */
@@ -11,8 +11,15 @@ export interface Iface {
   description?: string;
   /** Present on switch physical ports only. */
   switchport?: {
-    mode: "access" | "trunk" | "dynamic";
+    /** "dynamic" is DTP dynamic auto (the 2960 default); "desirable" is dynamic desirable. */
+    mode: "access" | "trunk" | "dynamic" | "desirable";
     accessVlan: number;
+    /** 802.1Q native VLAN on trunks (default 1). */
+    nativeVlan?: number;
+    /** VLANs allowed on the trunk; undefined means all (1-4094). */
+    allowedVlans?: number[];
+    /** "switchport nonegotiate": DTP frames are not sent. */
+    nonegotiate?: boolean;
     portfast?: boolean;
     bpduguard?: boolean;
     portSecurity?: PortSecurity;
@@ -30,6 +37,14 @@ export interface Iface {
   nat?: "inside" | "outside";
   /** "ip access-group <acl> in|out". */
   acl?: { in?: string; out?: string };
+  /** "ip helper-address": DHCP relay target. */
+  helper?: number;
+  /** "ip ospf priority" (default 1; 0 = never DR/BDR). */
+  ospfPriority?: number;
+  /** CDP / LLDP per-interface switches (CDP defaults on, LLDP tx/rx default on once "lldp run"). */
+  cdp?: boolean;
+  lldpTx?: boolean;
+  lldpRx?: boolean;
 }
 
 export type ChannelMode = "active" | "passive" | "on" | "desirable" | "auto";
@@ -82,6 +97,8 @@ export interface AclEntry {
   src: AddrMatch;
   dst?: AddrMatch;
   port?: number;
+  /** Sequence number; named ACLs always carry one, numbered lists are implicitly 10, 20, ... */
+  seq?: number;
 }
 
 export type NatRule =
@@ -120,6 +137,28 @@ export interface OspfProcess {
   pid: number;
   routerId?: number;
   networks: OspfNetwork[];
+  /** Interfaces set with "passive-interface": advertised, but no hellos / neighbors. */
+  passive?: string[];
+  /** "default-information originate": advertise this router's static default route. */
+  defaultOriginate?: boolean;
+}
+
+export type SnmpCommunity = { name: string; access: "ro" | "rw" };
+
+export interface Management {
+  ntpServers: number[];
+  /** "ntp master <stratum>": this router serves time. */
+  ntpMaster?: number;
+  timezone?: { name: string; offset: number };
+  logHosts: number[];
+  /** Syslog trap severity 0-7 (default 6, informational). */
+  logTrap?: number;
+  timestamps: boolean;
+  snmp: SnmpCommunity[];
+  snmpLocation?: string;
+  snmpContact?: string;
+  cdp: boolean;
+  lldp: boolean;
 }
 
 export interface Device {
@@ -128,7 +167,7 @@ export interface Device {
   hostname: string;
   mode: Mode;
   /** Context for sub-modes. */
-  ctx: { iface?: string; ospfPid?: number; vlan?: number; pool?: string; line?: "con" | "vty"; range?: string[] };
+  ctx: { iface?: string; ospfPid?: number; vlan?: number; pool?: string; line?: "con" | "vty"; range?: string[]; acl?: string };
   interfaces: Record<string, Iface>;
   /** Switch VLAN database (id -> name). */
   vlans: Record<number, string>;
@@ -140,8 +179,13 @@ export interface Device {
   saved: boolean;
   /** Burned-in MAC, used for STP bridge IDs and DHCP bindings ("0001.4A11.0001"). */
   mac: string;
-  /** Numbered access lists, keyed by number as typed. */
+  /** Access lists, keyed by number or name as typed. */
   acls: Record<string, AclEntry[]>;
+  /** Named ACLs ("ip access-list extended NAME") and their type. Numbered lists are not listed here. */
+  namedAcls: Record<string, "standard" | "extended">;
+  mgmt: Management;
+  /** Hosts: TCP ports a server listens on, and whether it serves NTP. */
+  services?: { tcp: number[]; ntp?: boolean };
   nat: { rules: NatRule[]; translations: NatTranslation[] };
   dhcp: { excluded: [number, number][]; pools: Record<string, DhcpPool> };
   /** Switches: spanning-tree mode and per-VLAN bridge priority (without the sys-id-ext). */
@@ -231,6 +275,8 @@ export function makeDevice(spec: DeviceSpec): Device {
     ipv6Routing: false,
     staticRoutes6: [],
     acls: {},
+    namedAcls: {},
+    mgmt: { ntpServers: [], logHosts: [], timestamps: false, snmp: [], cdp: spec.kind !== "pc", lldp: false },
     nat: { rules: [], translations: [] },
     dhcp: { excluded: [], pools: {} },
     stp: { mode: "pvst", priority: {} },

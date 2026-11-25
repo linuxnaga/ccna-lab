@@ -1,7 +1,7 @@
 import type { TopologyLink } from "../types";
 import type { ChannelMode, CiscoState, Device, Iface, NatTranslation } from "./model";
 import { maskToPrefix, network, prefixToMask, sameSubnet, wildcardMatch } from "./ip";
-import { aclPermits, aclPermitsSource } from "./acl";
+import { aclPermits, aclPermitsSource, type Packet } from "./acl";
 import { isLinkLocal, linkLocal, network6, sameSubnet6 } from "./ip6";
 
 /* ------------------------------------------------------------------ */
@@ -44,8 +44,7 @@ export function ifaceState(state: CiscoState, devId: string, ifName: string): If
       vlan in dev.vlans &&
       Object.values(dev.interfaces).some((p) => {
         if (!p.switchport || p.shutdown) return false;
-        const carries = p.switchport.mode === "trunk" || p.switchport.accessVlan === vlan;
-        return carries && physicalUp(state, devId, p.name);
+        return carriesVlan(state, devId, p.name, vlan) && physicalUp(state, devId, p.name);
       });
     return { status: active ? "up" : "down", protocol: active ? "up" : "down" };
   }
@@ -150,6 +149,80 @@ export function logicalPort(state: CiscoState, devId: string, ifName: string): s
 }
 
 /* ------------------------------------------------------------------ */
+/* Trunking: DTP, native VLAN, allowed VLANs                           */
+/* ------------------------------------------------------------------ */
+
+type Switchport = NonNullable<Iface["switchport"]>;
+
+/** The switchport settings a port forwards with: its port-channel's when it is a bundled member. */
+export function effectiveSwitchport(state: CiscoState, devId: string, ifName: string): Switchport | undefined {
+  const dev = state.devices[devId];
+  const iface = dev?.interfaces[ifName];
+  if (!iface?.switchport) return undefined;
+  const po = iface.channelGroup && dev.interfaces[`Port-channel${iface.channelGroup.id}`]?.switchport;
+  return po && memberStatus(state, devId, ifName) === "P" ? po : iface.switchport;
+}
+
+/**
+ * Is the port operationally trunking? "trunk" always is; "access" never is.
+ * Dynamic ports negotiate with DTP: auto trunks only when the far switch
+ * actively asks (trunk without nonegotiate, or desirable); desirable also
+ * trunks with a dynamic auto peer.
+ */
+export function isTrunking(state: CiscoState, devId: string, ifName: string): boolean {
+  const dev = state.devices[devId];
+  const sp = effectiveSwitchport(state, devId, ifName);
+  if (!dev || !sp) return false;
+  if (sp.mode === "trunk") return true;
+  if (sp.mode === "access") return false;
+  let phys = ifName;
+  if (ifName.startsWith("Port-channel")) {
+    const id = Number(ifName.slice("Port-channel".length));
+    const m = Object.values(dev.interfaces).find((x) => x.channelGroup?.id === id && memberStatus(state, devId, x.name) === "P");
+    if (!m) return false;
+    phys = m.name;
+  }
+  const l = findLink(state, devId, phys);
+  const peer = l && state.devices[l.peer.device];
+  if (!l || peer?.kind !== "switch") return false;
+  const theirs = effectiveSwitchport(state, peer.id, l.peer.port);
+  if (!theirs) return false;
+  if (theirs.mode === "trunk") return !theirs.nonegotiate;
+  if (theirs.mode === "desirable") return true;
+  return sp.mode === "desirable" && theirs.mode === "dynamic";
+}
+
+export const nativeVlan = (sp: Switchport) => sp.nativeVlan ?? 1;
+export const trunkAllows = (sp: Switchport, vlan: number) => !sp.allowedVlans || sp.allowedVlans.includes(vlan);
+
+/** Does this switch port forward frames for the VLAN (as access port, or as a trunk allowing it)? */
+export function carriesVlan(state: CiscoState, devId: string, ifName: string, vlan: number): boolean {
+  const dev = state.devices[devId];
+  const sp = effectiveSwitchport(state, devId, ifName);
+  if (!sp || !(vlan in dev.vlans)) return false;
+  return isTrunking(state, devId, ifName) ? trunkAllows(sp, vlan) : sp.accessVlan === vlan;
+}
+
+/** VLAN of untagged frames on a switch port: the native VLAN on trunks, the access VLAN otherwise. */
+export function untaggedVlan(state: CiscoState, devId: string, ifName: string): number | null {
+  const sp = effectiveSwitchport(state, devId, ifName);
+  if (!sp) return null;
+  if (!isTrunking(state, devId, ifName)) return sp.accessVlan;
+  return trunkAllows(sp, nativeVlan(sp)) ? nativeVlan(sp) : null;
+}
+
+/** Native VLAN mismatch between two trunking switches, as CDP reports it. */
+export function nativeMismatch(state: CiscoState, devId: string, ifName: string): { peer: string; peerIface: string; mine: number; theirs: number } | null {
+  const l = findLink(state, devId, ifName);
+  if (!l || !physicalUp(state, devId, ifName)) return null;
+  const a = effectiveSwitchport(state, devId, ifName);
+  const b = effectiveSwitchport(state, l.peer.device, l.peer.port);
+  if (!a || !b || !isTrunking(state, devId, ifName) || !isTrunking(state, l.peer.device, l.peer.port)) return null;
+  if (nativeVlan(a) === nativeVlan(b)) return null;
+  return { peer: l.peer.device, peerIface: l.peer.port, mine: nativeVlan(a), theirs: nativeVlan(b) };
+}
+
+/* ------------------------------------------------------------------ */
 /* Layer 2 broadcast domains (union-find over ports and VLANs)        */
 /* ------------------------------------------------------------------ */
 
@@ -192,15 +265,19 @@ function attachment(state: CiscoState, dev: Device, iface: Iface): Attachment {
     return { untagged: l3Key(dev.id, iface.name), tagged, trunk: tagged.size > 0 };
   }
   // Bundled members forward with the port-channel's configuration.
-  const sp = iface.channelGroup && dev.interfaces[`Port-channel${iface.channelGroup.id}`]?.switchport && memberStatus(state, dev.id, iface.name) === "P"
-    ? dev.interfaces[`Port-channel${iface.channelGroup.id}`].switchport!
-    : iface.switchport;
-  if (sp.mode === "trunk") {
-    const tagged = new Map(Object.keys(dev.vlans).map((v) => [Number(v), vlanKey(dev.id, Number(v))] as const));
-    return { untagged: 1 in dev.vlans ? vlanKey(dev.id, 1) : null, tagged, trunk: true };
+  const sp = effectiveSwitchport(state, dev.id, iface.name)!;
+  const v = untaggedVlan(state, dev.id, iface.name);
+  const untagged = v !== null && v in dev.vlans ? vlanKey(dev.id, v) : null;
+  if (isTrunking(state, dev.id, iface.name)) {
+    const tagged = new Map(
+      Object.keys(dev.vlans)
+        .map(Number)
+        .filter((x) => x !== nativeVlan(sp) && trunkAllows(sp, x))
+        .map((x) => [x, vlanKey(dev.id, x)] as const),
+    );
+    return { untagged, tagged, trunk: true };
   }
-  const v = sp.accessVlan;
-  return { untagged: v in dev.vlans ? vlanKey(dev.id, v) : null, tagged: new Map(), trunk: false };
+  return { untagged, tagged: new Map(), trunk: false };
 }
 
 export function l2Domains(state: CiscoState): UnionFind {
@@ -247,6 +324,8 @@ export interface Route {
   metric: number;
   nextHop?: number;
   iface?: string;
+  /** OSPF external (type 2), e.g. a default route from "default-information originate". */
+  ext?: boolean;
 }
 
 interface L3If {
@@ -292,21 +371,28 @@ export function ospfIfaces(state: CiscoState, dev: Device): (L3If & { area: numb
   return out;
 }
 
+/** OSPF interfaces that send hellos: everything except passive interfaces. */
+export function ospfActiveIfaces(state: CiscoState, dev: Device): (L3If & { area: number })[] {
+  const passive = new Set(dev.ospf?.passive ?? []);
+  return ospfIfaces(state, dev).filter((i) => !passive.has(i.iface));
+}
+
 export interface OspfNeighbor {
   router: string;
   routerId: number;
   ip: number;
   localIface: string;
+  remoteIface: string;
 }
 
 export function ospfNeighbors(state: CiscoState, devId: string, uf = l2Domains(state)): OspfNeighbor[] {
   const dev = state.devices[devId];
-  const mine = ospfIfaces(state, dev);
+  const mine = ospfActiveIfaces(state, dev);
   if (!mine.length) return [];
   const result: OspfNeighbor[] = [];
   for (const other of Object.values(state.devices)) {
     if (other.id === devId || other.kind !== "router") continue;
-    const theirs = ospfIfaces(state, other);
+    const theirs = ospfActiveIfaces(state, other);
     const rid = ospfRouterId(state, other);
     if (rid === undefined) continue;
     for (const a of mine) {
@@ -317,12 +403,53 @@ export function ospfNeighbors(state: CiscoState, devId: string, uf = l2Domains(s
           sameSubnet(a.ip, b.ip, a.mask) &&
           uf.find(l3Key(devId, a.iface)) === uf.find(l3Key(other.id, b.iface))
         ) {
-          result.push({ router: other.id, routerId: rid, ip: b.ip, localIface: a.iface });
+          result.push({ router: other.id, routerId: rid, ip: b.ip, localIface: a.iface, remoteIface: b.iface });
         }
       }
     }
   }
   return result;
+}
+
+export type OspfRole = "DR" | "BDR" | "DROTHER";
+
+export interface OspfSegment {
+  dr?: { router: string; routerId: number; ip: number };
+  bdr?: { router: string; routerId: number; ip: number };
+  /** This router's role on the segment. */
+  role: OspfRole;
+  priority: number;
+}
+
+/**
+ * DR/BDR election on one OSPF segment: highest interface priority wins, then
+ * highest router ID; priority 0 never becomes DR or BDR. (Real IOS does not
+ * preempt a sitting DR; this lab model always shows the settled election,
+ * as after "clear ip ospf process" on every router.)
+ */
+export function ospfSegment(state: CiscoState, devId: string, ifName: string, uf = l2Domains(state)): OspfSegment {
+  const dev = state.devices[devId];
+  const me = dev.interfaces[ifName];
+  const priority = me?.ospfPriority ?? 1;
+  const myRid = ospfRouterId(state, dev) ?? 0;
+  const members = [
+    { router: devId, routerId: myRid, ip: me?.ip ?? 0, priority },
+    ...ospfNeighbors(state, devId, uf)
+      .filter((n) => n.localIface === ifName)
+      .map((n) => ({ router: n.router, routerId: n.routerId, ip: n.ip, priority: state.devices[n.router].interfaces[n.remoteIface].ospfPriority ?? 1 })),
+  ];
+  const eligible = members.filter((m) => m.priority > 0).sort((a, b) => b.priority - a.priority || b.routerId - a.routerId);
+  const [dr, bdr] = eligible;
+  const strip = (m?: (typeof members)[number]) => (m ? { router: m.router, routerId: m.routerId, ip: m.ip } : undefined);
+  const role: OspfRole = dr?.router === devId ? "DR" : bdr?.router === devId ? "BDR" : "DROTHER";
+  return { dr: strip(dr), bdr: strip(bdr), role, priority };
+}
+
+/** A static default route this router could inject with "default-information originate". */
+function originatesDefault(state: CiscoState, dev: Device): boolean {
+  if (!dev.ospf?.defaultOriginate) return false;
+  const conn = connectedRoutes(state, dev).filter((r) => r.source === "C");
+  return dev.staticRoutes.some((r) => r.net === 0 && r.mask === 0 && conn.some((c) => sameSubnet(r.nextHop, c.net, c.mask)));
 }
 
 function ospfRoutes(state: CiscoState, dev: Device, uf: UnionFind): Route[] {
@@ -352,6 +479,13 @@ function ospfRoutes(state: CiscoState, dev: Device, uf: UnionFind): Route[] {
       const existing = best.get(key);
       if (!existing || metric < existing.metric) {
         best.set(key, { source: "O", net, mask: i.mask, ad: 110, metric, nextHop: firstHop.ip, iface: firstHop.localIface });
+      }
+    }
+    // External type 2 default: the metric stays 1 however far away the ASBR is.
+    if (originatesDefault(state, state.devices[rid])) {
+      // dist is filled in Dijkstra order, so the first originator found is the closest.
+      if (!best.has("0/0")) {
+        best.set("0/0", { source: "O", ext: true, net: 0, mask: 0, ad: 110, metric: 1, nextHop: firstHop.ip, iface: firstHop.localIface });
       }
     }
   }
@@ -447,9 +581,11 @@ export function deliver(
   fromId: string,
   dstIn: number,
   uf = l2Domains(state),
-  opts: { src?: number; flows?: Flows } = {},
+  opts: { src?: number; flows?: Flows; proto?: Packet["proto"]; port?: number; skipAcl?: boolean } = {},
 ): DeliveryResult {
   const flows = opts.flows ?? new Map();
+  const proto = opts.proto ?? "icmp";
+  const pkt = (s: number, d: number): Packet => ({ src: s, dst: d, proto, port: opts.port });
   let cur = fromId;
   let src = opts.src;
   let dst = dstIn;
@@ -460,7 +596,7 @@ export function deliver(
     const isRouter = dev.kind === "router";
     if (ingress && isRouter) {
       const inIf = dev.interfaces[ingress];
-      if (!aclPermits(dev, inIf.acl?.in, { src: src!, dst, proto: "icmp" })) return { ok: false, reason: "filtered", at: cur };
+      if (!opts.skipAcl && !aclPermits(dev, inIf.acl?.in, pkt(src!, dst))) return { ok: false, reason: "filtered", at: cur };
       if (inIf.nat === "outside") {
         const flow = flows.get(`${cur}|${dst}`);
         const stat = dev.nat.rules.find((r) => r.kind === "static" && r.global === dst);
@@ -493,7 +629,7 @@ export function deliver(
         src = global;
       }
     }
-    if (isRouter && ingress && !aclPermits(dev, dev.interfaces[egress!].acl?.out, { src, dst, proto: "icmp" })) {
+    if (isRouter && ingress && !opts.skipAcl && !aclPermits(dev, dev.interfaces[egress!].acl?.out, pkt(src, dst))) {
       return { ok: false, reason: "filtered", at: cur };
     }
 
@@ -534,6 +670,35 @@ export function ping(state: CiscoState, fromId: string, dst: number): PingResult
   if (owner === fromId) return { ok: true, unreachable: false, translations: [] };
   const back = deliver(state, owner, there.src, uf, { src: there.dst, flows });
   return { ok: back.ok, unreachable: !back.ok && back.reason !== "timeout", translations: back.ok ? translations() : [] };
+}
+
+export type TcpResult = "open" | "refused" | "filtered" | "unreachable" | "timeout";
+
+/** Is a TCP port listening on this device? Hosts list their services; routers answer SSH/Telnet per their vty lines. */
+export function listens(dev: Device, port: number): boolean {
+  if (dev.kind !== "router" && dev.kind !== "switch") return !!dev.services?.tcp.includes(port);
+  const vty = dev.security.lines.vty;
+  const transport = vty.transport ?? "all";
+  const auth = vty.login === "local" ? Object.keys(dev.security.users).length > 0 : !!vty.password;
+  if (port === 22) return (transport === "ssh" || transport === "all") && !!dev.security.rsaBits && vty.login === "local";
+  if (port === 23) return (transport === "telnet" || transport === "all") && auth;
+  return false;
+}
+
+/**
+ * A TCP connection attempt (curl, telnet). ACLs are checked on the way to
+ * the server; replies are treated as established traffic of that session,
+ * as a stateful edge would, so they are not filtered again.
+ */
+export function tcpConnect(state: CiscoState, fromId: string, dst: number, port: number): TcpResult {
+  const uf = l2Domains(state);
+  const flows: Flows = new Map();
+  const there = deliver(state, fromId, dst, uf, { flows, proto: "tcp", port });
+  if (!there.ok) return there.reason === "filtered" ? "filtered" : there.reason === "no-route" ? "unreachable" : "timeout";
+  const owner = there.hops[there.hops.length - 1];
+  const back = owner === fromId ? there : deliver(state, owner, there.src, uf, { src: there.dst, flows, proto: "tcp", skipAcl: true });
+  if (!back.ok) return "timeout";
+  return listens(state.devices[owner], port) ? "open" : "refused";
 }
 
 /* ------------------------------------------------------------------ */
@@ -708,32 +873,59 @@ export interface DhcpLease {
   mask: number;
   gateway?: number;
   dns?: number;
+  /** Router that relayed the request, when the server is remote. */
+  relay?: string;
 }
 
-/** Find a DHCP server on the client's broadcast domain and pick the lowest free address. */
-export function dhcpOffer(state: CiscoState, clientId: string, clientIf = "Ethernet0"): DhcpLease | null {
-  if (!physicalUp(state, clientId, clientIf)) return null;
-  const uf = l2Domains(state);
-  const me = uf.find(l3Key(clientId, clientIf));
+function leaseFrom(state: CiscoState, server: Device, pool: Device["dhcp"]["pools"][string], clientId: string): DhcpLease | null {
   const used = new Set<number>();
   for (const d of Object.values(state.devices)) {
     if (d.id === clientId) continue;
     for (const i of Object.values(d.interfaces)) if (i.ip !== undefined) used.add(i.ip);
   }
+  const net = network(pool.net!, pool.mask!);
+  const bcast = (net | (~pool.mask! >>> 0)) >>> 0;
+  for (let a = net + 1; a < bcast; a++) {
+    if (used.has(a) || server.dhcp.excluded.some(([lo, hi]) => a >= lo && a <= hi)) continue;
+    return { server: server.id, ip: a, mask: pool.mask!, gateway: pool.defaultRouter, dns: pool.dns };
+  }
+  return null;
+}
+
+const poolFor = (dev: Device, addr: number) =>
+  Object.values(dev.dhcp.pools).find((p) => p.net !== undefined && p.mask !== undefined && sameSubnet(addr, p.net, p.mask));
+
+/**
+ * Find a DHCP server for the client: a router on its broadcast domain with a
+ * pool for that subnet, or, through a router interface with
+ * "ip helper-address", a remote server with a pool for the relay's subnet
+ * (the relay's address is the giaddr the server picks the pool by).
+ */
+export function dhcpOffer(state: CiscoState, clientId: string, clientIf = "Ethernet0"): DhcpLease | null {
+  if (!physicalUp(state, clientId, clientIf)) return null;
+  const uf = l2Domains(state);
+  const me = uf.find(l3Key(clientId, clientIf));
+  const segment: { dev: Device; i: L3If }[] = [];
   for (const dev of Object.values(state.devices)) {
     if (dev.kind !== "router") continue;
-    for (const i of upL3Ifaces(state, dev)) {
-      if (uf.find(l3Key(dev.id, i.iface)) !== me) continue;
-      const pool = Object.values(dev.dhcp.pools).find((p) => p.net !== undefined && p.mask !== undefined && sameSubnet(i.ip, p.net, p.mask));
-      if (!pool) continue;
-      const net = network(pool.net!, pool.mask!);
-      const bcast = (net | (~pool.mask! >>> 0)) >>> 0;
-      for (let a = net + 1; a < bcast; a++) {
-        if (used.has(a) || dev.dhcp.excluded.some(([lo, hi]) => a >= lo && a <= hi)) continue;
-        return { server: dev.id, ip: a, mask: pool.mask!, gateway: pool.defaultRouter, dns: pool.dns };
-      }
-      return null;
-    }
+    for (const i of upL3Ifaces(state, dev)) if (uf.find(l3Key(dev.id, i.iface)) === me) segment.push({ dev, i });
+  }
+  for (const { dev, i } of segment) {
+    const pool = poolFor(dev, i.ip);
+    if (pool) return leaseFrom(state, dev, pool, clientId);
+  }
+  for (const { dev, i } of segment) {
+    const helper = dev.interfaces[i.iface].helper;
+    if (helper === undefined) continue;
+    const there = deliver(state, dev.id, helper, uf, { src: i.ip, proto: "udp", port: 67 });
+    if (!there.ok) continue;
+    const server = state.devices[there.hops[there.hops.length - 1]];
+    const back = deliver(state, server.id, i.ip, uf, { src: helper, proto: "udp", port: 67 });
+    if (!back.ok || server.kind !== "router") continue;
+    const pool = poolFor(server, i.ip);
+    if (!pool) continue;
+    const lease = leaseFrom(state, server, pool, clientId);
+    if (lease) return { ...lease, relay: dev.id };
   }
   return null;
 }

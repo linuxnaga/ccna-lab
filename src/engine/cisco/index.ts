@@ -2,9 +2,10 @@ import type { ExecResult, Topology, TopologyLink, VendorEngine } from "../types"
 import { cloneDevice, makeDevice, shortName, type CiscoState, type Device, type Mode } from "./model";
 import { MODE_SPECS, PARENT, type Ctx } from "./commands";
 import { completeLine, match, nextOptions, type MatchResult, type Spec } from "./parser";
-import { ifaceState, l2Domains, ospfNeighbors, portSecurityState } from "./network";
+import { ifaceState, l2Domains, nativeMismatch, ospfNeighbors, portSecurityState } from "./network";
 import { portBlocked } from "./stp";
 import { formatIp } from "./ip";
+import { aclType } from "./acl";
 
 export * from "./model";
 export {
@@ -21,10 +22,16 @@ export {
   routingTable,
   routingTable6,
   ospfNeighbors,
+  ospfSegment,
+  isTrunking,
+  effectiveSwitchport,
+  nativeMismatch,
+  tcpConnect,
 } from "./network";
 export { parseIp6, formatIp6, eui64 } from "./ip6";
 export { spanningTree, spanningTreeAll, portBlocked } from "./stp";
-export { aclPermits } from "./acl";
+export { aclPermits, aclType } from "./acl";
+export { cdpNeighbors, lldpNeighbors, ntpStatus } from "./mgmt";
 export { parseIp, formatIp } from "./ip";
 
 const SUFFIX: Record<Mode, string> = {
@@ -36,12 +43,14 @@ const SUFFIX: Record<Mode, string> = {
   vlan: "(config-vlan)#",
   dhcp: "(dhcp-config)#",
   line: "(config-line)#",
+  nacl: "(config-ext-nacl)#",
   pc: "",
 };
 
 function promptFor(dev: Device): string {
   if (dev.kind === "pc") return "C:\\>";
   if (dev.mode === "if" && dev.ctx.range) return dev.hostname + "(config-if-range)#";
+  if (dev.mode === "nacl") return dev.hostname + (aclType(dev, dev.ctx.acl!) === "standard" ? "(config-std-nacl)#" : "(config-ext-nacl)#");
   return dev.hostname + SUFFIX[dev.mode];
 }
 
@@ -96,6 +105,15 @@ function linkLogs(before: CiscoState, after: CiscoState, devId: string): string[
     }
   }
   const dev = after.devices[devId];
+  if (dev.kind === "switch") {
+    for (const name of Object.keys(dev.interfaces)) {
+      const now = nativeMismatch(after, devId, name);
+      const was = before.devices[devId].interfaces[name] ? nativeMismatch(before, devId, name) : null;
+      if (!now || (was && was.mine === now.mine && was.theirs === now.theirs)) continue;
+      if (!dev.mgmt.cdp || !after.devices[now.peer].mgmt.cdp) continue;
+      out.push(`%CDP-4-NATIVE_VLAN_MISMATCH: Native VLAN mismatch discovered on ${name} (${now.mine}), with ${after.devices[now.peer].hostname} ${now.peerIface} (${now.theirs}).`);
+    }
+  }
   for (const name of Object.keys(dev.interfaces)) {
     const a = before.devices[devId].interfaces[name] ? ifaceState(before, devId, name) : null;
     const b = ifaceState(after, devId, name);

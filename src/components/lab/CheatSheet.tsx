@@ -60,6 +60,17 @@ const SECTIONS: { title: string; rows: [string, string][] }[] = [
     ],
   },
   {
+    title: "Trunk security",
+    rows: [
+      ["switchport mode dynamic desirable | auto", "Let DTP negotiate a trunk (auto + auto never trunks)"],
+      ["switchport nonegotiate", "Stop sending DTP (needs mode trunk or access)"],
+      ["switchport trunk native vlan 999", "Untagged VLAN on the trunk: use an unused one, same on both ends"],
+      ["switchport trunk allowed vlan 10,20,999", "Only carry these VLANs (add / remove edit the list)"],
+      ["show interfaces g0/1 switchport", "Administrative vs operational mode, native VLAN"],
+      ["show interfaces trunk", "Trunking ports, native VLAN and allowed list"],
+    ],
+  },
+  {
     title: "Routing",
     rows: [
       ["ip route 10.2.0.0 255.255.0.0 10.0.0.2", "Static route: network, mask, next hop"],
@@ -68,6 +79,10 @@ const SECTIONS: { title: string; rows: [string, string][] }[] = [
       ["network 10.0.0.0 0.0.0.3 area 0", "Enable OSPF on matching interfaces (wildcard mask)"],
       ["ip route 0.0.0.0 0.0.0.0 10.0.0.1", "Default route (gateway of last resort)"],
       ["ip route 0.0.0.0 0.0.0.0 10.0.9.1 10", "Floating static: AD 10 backs up the AD 1 route"],
+      ["ip ospf priority 255  (interface)", "Win the DR election. 0 = never DR or BDR"],
+      ["passive-interface g0/1  (router ospf)", "No hellos on a user LAN; the subnet is still advertised"],
+      ["default-information originate  (router ospf)", "Advertise this router's default route (O*E2)"],
+      ["show ip ospf interface g0/0", "DR, BDR, priority and adjacencies on a segment"],
     ],
   },
   {
@@ -92,6 +107,19 @@ const SECTIONS: { title: string; rows: [string, string][] }[] = [
       ["ip nat inside source list 1 interface g0/1 overload", "PAT: many inside hosts share one public IP"],
       ["ip nat inside source static 10.1.1.100 203.0.113.5", "Static NAT: publish one inside host"],
       ["show ip nat translations / show ip dhcp binding", "Verify NAT entries and DHCP leases"],
+      ["ip helper-address 10.0.12.2  (interface)", "DHCP relay: forward client broadcasts to a remote server"],
+    ],
+  },
+  {
+    title: "Management: NTP, syslog, SNMP, CDP, LLDP",
+    rows: [
+      ["ntp server 10.10.10.50", "Sync the clock (show ntp status, show clock)"],
+      ["logging host 10.10.10.50 / logging trap warnings", "Send syslog at severity 4 and more urgent"],
+      ["service timestamps log datetime msec", "Timestamp log messages"],
+      ["snmp-server community <name> ro", "Read-only SNMP community (avoid public / RW)"],
+      ["show cdp neighbors [detail]", "Cisco neighbors: hostname, platform, port, IP"],
+      ["no cdp enable  (interface)  |  no cdp run", "Stop CDP on one port, or everywhere"],
+      ["lldp run  /  show lldp neighbors", "Vendor-neutral discovery (off by default)"],
     ],
   },
   {
@@ -101,7 +129,11 @@ const SECTIONS: { title: string; rows: [string, string][] }[] = [
       ["access-list 110 deny ip <src> <wc> <dst> <wc>", "Extended (100-199): place near the source"],
       ["access-list 110 permit ip any any", "Every ACL ends with an implicit deny any"],
       ["ip access-group 10 out", "Apply an ACL to an interface (in or out)"],
-      ["show access-lists", "List entries in order"],
+      ["show access-lists", "List entries in order, with sequence numbers"],
+      ["ip access-list extended WEB-IN", "Named ACL (config-ext-nacl)#; standard works too"],
+      ["15 permit tcp any host 10.1.1.10 eq 443", "Insert by sequence number; eq www, telnet, 22, ..."],
+      ["no 20", "Delete one entry from a named ACL"],
+      ["curl https://10.1.1.10  |  telnet 10.1.1.10 [port]", "PC: test TCP ports through your ACLs"],
     ],
   },
   {

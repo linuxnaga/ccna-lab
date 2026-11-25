@@ -37,7 +37,7 @@ src/
     api/progress              Records a completed lab and awards XP once
   engine/
     types.ts                  Vendor-neutral engine + lab contracts
-    cisco/                    Cisco IOS emulator (parser, modes, show, ping, OSPF, STP, ACLs, NAT, DHCP, HSRP, IPv6)
+    cisco/                    Cisco IOS emulator (parser, modes, show, ping, OSPF, STP, DTP, ACLs, NAT, DHCP, HSRP, IPv6, NTP/CDP/LLDP)
   labs/
     ccna/*.ts                 Lab definitions: topology, start state, objectives, hints
   components/lab/             Topology SVG, terminal, workspace, cheat sheet
@@ -101,14 +101,19 @@ Import the GitHub repo in Vercel, add the same environment variables (with `NEXT
 | 4 | Route Between the VLANs | Switching & VLANs | Router-on-a-stick: trunk the uplink, 802.1Q subinterfaces as VLAN gateways |
 | 5 | The Wrong Root Bridge | Switching & STP | Restore a VLAN and trunk, make the core the STP root, Rapid PVST+, PortFast and BPDU Guard |
 | 6 | Double the Uplink | Switching & STP | LACP EtherChannel with interface range, trunk the port-channel, STP sees one link |
-| 7 | Two Sites, One Network | IP Routing | Address a router, bring up a /30 WAN, OSPF area 0 with router IDs, end-to-end ping |
-| 8 | Backup Link Failover | IP Routing | Static and default routes with floating statics (AD 10) over a backup path |
-| 9 | IPv6 Comes to the Branch | IP Routing | IPv6 unicast routing, addressing, SLAAC with EUI-64, IPv6 static and default routes |
-| 10 | The Gateway That Never Dies | IP Routing | HSRP virtual gateway, priority and preempt, proven failover |
-| 11 | Branch Internet Edge | IP Services | DHCP server with exclusions, PAT (NAT overload) and static NAT for a web server |
-| 12 | Lock the Lobby Ports | Security | Port security with sticky and static MACs, err-disable a rogue laptop, black-hole VLAN |
-| 13 | Lock Down the Server Farm | Security | Standard and extended ACLs, enable secret, console password, SSH-only VTY |
-| 14 | Ticket #4471: Floor 3 Is Down | Troubleshooting | Find five planted faults: gateway, VLAN, shutdown, mask and OSPF area mismatches |
+| 7 | Seal the Trunk | Switching & VLANs | Fix a DTP/access mismatch, static trunk with nonegotiate, unused native VLAN, allowed VLAN list |
+| 8 | Two Sites, One Network | IP Routing | Address a router, bring up a /30 WAN, OSPF area 0 with router IDs, end-to-end ping |
+| 9 | Elect the Right DR | IP Routing | OSPF DR/BDR election with interface priority, passive interfaces, `default-information originate` |
+| 10 | Backup Link Failover | IP Routing | Static and default routes with floating statics (AD 10) over a backup path |
+| 11 | IPv6 Comes to the Branch | IP Routing | IPv6 unicast routing, addressing, SLAAC with EUI-64, IPv6 static and default routes |
+| 12 | The Gateway That Never Dies | IP Routing | HSRP virtual gateway, priority and preempt, proven failover |
+| 13 | Branch Internet Edge | IP Services | DHCP server with exclusions, PAT (NAT overload) and static NAT for a web server |
+| 14 | The Branch Gets No Lease | IP Services | Central DHCP pool, `ip helper-address` relay, the return route the server needs |
+| 15 | Put the Branch on the NOC's Radar | IP Services | CDP discovery, NTP, syslog level and timestamps, read-only SNMP, CDP off at the edge, LLDP |
+| 16 | Lock the Lobby Ports | Security | Port security with sticky and static MACs, err-disable a rogue laptop, black-hole VLAN |
+| 17 | Lock Down the Server Farm | Security | Standard and extended ACLs, enable secret, console password, SSH-only VTY |
+| 18 | Tighten the DMZ Firewall | Security | Edit a named ACL by sequence number, TCP port filters (HTTP/HTTPS/Telnet/SSH), tested with curl and telnet |
+| 19 | Ticket #4471: Floor 3 Is Down | Troubleshooting | Find five planted faults: gateway, VLAN, shutdown, mask and OSPF area mismatches |
 
 Labs unlock in order. A lab a player already completed stays open even if a new lab is inserted before it.
 
@@ -118,7 +123,7 @@ Labs unlock in order. A lab a player already completed stays open even if a new 
 npm test
 ```
 
-Engine tests cover parsing, modes, error messages, VLANs, STP, EtherChannel, port security, router-on-a-stick, static and floating static routes, OSPF, HSRP, IPv6, ACLs, NAT and DHCP. Every lab is also played with a reference solution, which must complete all objectives without a CLI error.
+Engine tests cover parsing, modes, error messages, VLANs, DTP and trunk settings, STP, EtherChannel, port security, router-on-a-stick, static and floating static routes, OSPF (including DR election), HSRP, IPv6, standard, extended and named ACLs, NAT, DHCP and DHCP relay, NTP, CDP and LLDP. Every lab is also played with a reference solution, which must complete all objectives without a CLI error.
 
 ## Adding a lab
 

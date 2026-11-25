@@ -2,8 +2,17 @@ import type { AclEntry, AddrMatch, CiscoState, Device, Mode } from "./model";
 import { formatIp, isHostAddress, maskToPrefix, network, parseIp, sameSubnet } from "./ip";
 import { eui64, formatIp6, isLinkLocal, network6, parseIp6, parsePrefix6, sameSubnet6 } from "./ip6";
 import { spec, type Args, type Spec } from "./parser";
-import { dhcpOffer, ping, ping6, slaacOffer, type PingResult } from "./network";
-import { ANY, aclKind } from "./acl";
+import { dhcpOffer, ping, ping6, slaacOffer, tcpConnect, type PingResult } from "./network";
+import { ANY, aclKind, aclType, parsePort } from "./acl";
+import {
+  showCdpNeighbors,
+  showClock,
+  showLldpNeighbors,
+  showLogging,
+  showNtpAssociations,
+  showNtpStatus,
+  showSnmpCommunity,
+} from "./mgmt";
 import { spanningTreeAll } from "./stp";
 import {
   showAccessLists,
@@ -20,7 +29,10 @@ import {
   showIpIntBrief,
   showIpProtocols,
   showIpRoute,
+  showInterfaceSwitchport,
   showNatTranslations,
+  showOspfInterface,
+  SEVERITIES,
   showOspfIfBrief,
   showOspfNeighbor,
   showRunningConfig,
@@ -72,6 +84,22 @@ function ensureVlan(ctx: Ctx, id: number): boolean {
   return true;
 }
 
+/** "10,20,30-35" -> [10, 20, 30, 31, ...]. */
+function parseVlanList(ctx: Ctx, text: string): number[] | null {
+  const out: number[] = [];
+  for (const part of text.split(",")) {
+    const m = /^(\d+)(?:-(\d+))?$/.exec(part);
+    const lo = m ? Number(m[1]) : NaN;
+    const hi = m?.[2] ? Number(m[2]) : lo;
+    if (!m || lo < 1 || hi > 4094 || hi < lo) {
+      fail(ctx, "Command rejected: Bad VLAN allowed list.", "% Use a list like 10,20,999 or a range like 10-20.");
+      return null;
+    }
+    for (let v = lo; v <= hi; v++) out.push(v);
+  }
+  return [...new Set(out)].sort((a, b) => a - b);
+}
+
 /* ---------------------------- EXEC ---------------------------- */
 
 /** Remember the NAT translations a ping created, for "show ip nat translations". */
@@ -113,17 +141,58 @@ function doPing6(ctx: Ctx, dst: string) {
   );
 }
 
+function tcpLines(ctx: Ctx, dst: string, port: number, kind: "telnet" | "ssh"): string[] {
+  const r = tcpConnect(ctx.state, ctx.dev.id, ip(dst), port);
+  const t = formatIp(ip(dst));
+  if (r === "open") {
+    const peer = Object.values(ctx.state.devices).find((d) => Object.values(d.interfaces).some((i) => i.ip === ip(dst)));
+    if (kind === "ssh") return [`Connected to ${t} port 22 (SSH-2.0-OpenSSH)`, "Password: ", `% Lab note: the session to ${peer?.hostname ?? t} was opened and closed again.`];
+    return [`Trying ${t} ...Open`, "", "User Access Verification", "", "Password: ", `% Lab note: the session to ${peer?.hostname ?? t} was opened and closed again.`];
+  }
+  if (r === "refused") return [`Trying ${t} ...`, `% Connection refused by remote host`];
+  if (r === "filtered" || r === "unreachable") return [`Trying ${t} ...`, "% Destination unreachable; gateway or host down"];
+  return [`Trying ${t} ...`, "% Connection timed out; remote host not responding"];
+}
+
+const mgmtShows: S[] = [
+  spec("show cdp neighbors", "CDP neighbor entries", (c) => c.out.push(...showCdpNeighbors(c.state, c.dev, false))),
+  spec("show cdp neighbors detail", "Show detailed information", (c) => c.out.push(...showCdpNeighbors(c.state, c.dev, true))),
+  spec("show lldp neighbors", "LLDP neighbor entries", (c) => c.out.push(...showLldpNeighbors(c.state, c.dev))),
+  spec("show ntp status", "NTP status", (c) => c.out.push(...showNtpStatus(c.state, c.dev))),
+  spec("show ntp associations", "NTP associations", (c) => c.out.push(...showNtpAssociations(c.state, c.dev))),
+  spec("show clock", "Display the system clock", (c) => c.out.push(...showClock(c.state, c.dev))),
+];
+
 const userExec: S[] = [
   spec("ping <ipv6:dst>", "Send echo messages", (c, a) => doPing6(c, String(a.dst))),
   spec("enable", "Turn on privileged commands", (c) => setMode(c, "priv")),
   spec("ping <ip:dst>", "Send echo messages", (c, a) => doPing(c, String(a.dst))),
   spec("show ip interface brief", "Brief summary of IP status and configuration", (c) => c.out.push(...showIpIntBrief(c.state, c.dev))),
   spec("show ip route", "IP routing table", (c) => c.out.push(...showIpRoute(c.state, c.dev))),
+  ...mgmtShows,
+  spec("telnet <ip:dst>", "Open a telnet connection", (c, a) => c.out.push(...tcpLines(c, String(a.dst), 23, "telnet"))),
   spec("exit", "Exit from the EXEC", (c) => setMode(c, "user")),
   spec("logout", "Exit from the EXEC", (c) => setMode(c, "user")),
 ];
 
 const privExec: S[] = [
+  ...mgmtShows,
+  spec("show logging", "Show the contents of logging buffers", (c) => c.out.push(...showLogging(c.state, c.dev))),
+  spec("show snmp community", "show snmp communities", (c) => c.out.push(...showSnmpCommunity(c.dev))),
+  spec("show interfaces <iface:name> switchport", "Show interface switchport information", (c, a) => {
+    const out = showInterfaceSwitchport(c.state, c.dev, String(a.name));
+    if (!out.length) return fail(c, "% Interface is not a switchport");
+    c.out.push(...out);
+  }, isSwitch),
+  spec("show ip ospf interface", "Interface information", (c) => c.out.push(...showOspfInterface(c.state, c.dev)), isRouter),
+  spec("show ip ospf interface <iface:name>", "Interface information", (c, a) => c.out.push(...showOspfInterface(c.state, c.dev, String(a.name))), isRouter),
+  spec("clear ip ospf process", "Reset OSPF process", (c) => {
+    if (!c.dev.ospf) return fail(c, "% OSPF is not running");
+    c.out.push("Reset ALL OSPF processes? [no]: yes");
+  }, isRouter),
+  spec("show ip access-lists", "List IP access lists", (c) => c.out.push(...showAccessLists(c.dev))),
+  spec("telnet <ip:dst>", "Open a telnet connection", (c, a) => c.out.push(...tcpLines(c, String(a.dst), 23, "telnet"))),
+  spec("ssh -l <word:user> <ip:dst>", "Open a secure shell client connection", (c, a) => c.out.push(...tcpLines(c, String(a.dst), 22, "ssh"))),
   spec("configure terminal", "Configure from the terminal", (c) => {
     c.out.push("Enter configuration commands, one per line.  End with CNTL/Z.");
     setMode(c, "config");
@@ -144,7 +213,7 @@ const privExec: S[] = [
   spec("show ip interface brief", "Brief summary of IP status and configuration", (c) => c.out.push(...showIpIntBrief(c.state, c.dev))),
   spec("show ip route", "IP routing table", (c) => c.out.push(...showIpRoute(c.state, c.dev))),
   spec("show ip ospf neighbor", "Neighbor list", (c) => c.out.push(...showOspfNeighbor(c.state, c.dev)), isRouter),
-  spec("show vlan brief", "VTP all VLAN status in brief", (c) => c.out.push(...showVlanBrief(c.dev)), isSwitch),
+  spec("show vlan brief", "VTP all VLAN status in brief", (c) => c.out.push(...showVlanBrief(c.state, c.dev)), isSwitch),
   spec("show interfaces trunk", "Show interface trunk information", (c) => c.out.push(...showInterfacesTrunk(c.state, c.dev)), isSwitch),
   spec("show interfaces status", "Show interface line status", (c) => c.out.push(...showInterfacesStatus(c.state, c.dev)), isSwitch),
   spec("show spanning-tree", "Spanning tree topology", (c) => c.out.push(...showSpanningTree(c.state, c.dev)), isSwitch),
@@ -248,6 +317,7 @@ const DST_FORMS = SRC_FORMS.map((f) => ({
 }));
 
 function addAce(c: Ctx, a: Args, kind: "standard" | "extended", entry: AclEntry) {
+  if (c.dev.namedAcls[String(a.n)]) return fail(c, `% Access list ${a.n} is a named list: edit it with "ip access-list ${c.dev.namedAcls[String(a.n)]} ${a.n}".`);
   const n = Number(a.n);
   const actual = aclKind(n);
   if (!actual) return fail(c, "% Invalid input detected at '^' marker.", "% Use 1-99 for standard and 100-199 for extended access lists.");
@@ -260,29 +330,80 @@ function addAce(c: Ctx, a: Args, kind: "standard" | "extended", entry: AclEntry)
     );
   }
   const list = (c.dev.acls[String(n)] ??= []);
-  const same = (x: AclEntry) => JSON.stringify(x) === JSON.stringify(entry);
-  if (!list.some(same)) list.push(entry);
+  const same = (x: AclEntry) => JSON.stringify({ ...x, seq: undefined }) === JSON.stringify(entry);
+  // Once a numbered list has been edited in named mode its entries carry sequence numbers.
+  if (!list.some(same)) list.push(list.some((e) => e.seq !== undefined) ? { ...entry, seq: Math.max(...list.map((e) => e.seq ?? 0)) + 10 } : entry);
 }
 
-const aclSpecs: S[] = [];
-for (const action of ["permit", "deny"] as const) {
-  aclSpecs.push(spec(`access-list <int:n> ${action} <ip:srcHost>`, "Add an access list entry", (c, a) =>
-    addAce(c, a, "standard", { action, src: { ip: ip(a.srcHost), wildcard: 0 } }), isRouter));
-  for (const sf of SRC_FORMS) {
-    aclSpecs.push(spec(`access-list <int:n> ${action} ${sf.pat}`, "Add an access list entry", (c, a) =>
-      addAce(c, a, "standard", { action, src: sf.get(a) }), isRouter));
-    for (const proto of ["ip", "icmp", "tcp", "udp"] as const) {
-      for (const df of DST_FORMS) {
-        const base = `access-list <int:n> ${action} ${proto} ${sf.pat} ${df.pat}`;
-        aclSpecs.push(spec(base, "Add an access list entry", (c, a) =>
-          addAce(c, a, "extended", { action, proto, src: sf.get(a), dst: df.get(a) }), isRouter));
-        if (proto === "tcp" || proto === "udp") {
-          aclSpecs.push(spec(`${base} eq <int:port>`, "Add an access list entry", (c, a) =>
-            addAce(c, a, "extended", { action, proto, src: sf.get(a), dst: df.get(a), port: Number(a.port) }), isRouter));
+/**
+ * Every permit/deny form, as specs. "head" is what comes before the action:
+ * "access-list <int:n>" for numbered lists, "" or "<int:seq>" inside a named list.
+ */
+function aceSpecs(head: string, add: (c: Ctx, a: Args, kind: "standard" | "extended", entry: AclEntry) => void, when: (d: Device) => boolean, kinds: ("standard" | "extended")[]): S[] {
+  const out: S[] = [];
+  const pre = head ? head + " " : "";
+  for (const action of ["permit", "deny"] as const) {
+    if (kinds.includes("standard")) {
+      out.push(spec(`${pre}${action} <ip:srcHost>`, "Specify packets to " + (action === "permit" ? "forward" : "reject"), (c, a) =>
+        add(c, a, "standard", { action, src: { ip: ip(a.srcHost), wildcard: 0 } }), when));
+    }
+    for (const sf of SRC_FORMS) {
+      if (kinds.includes("standard")) {
+        out.push(spec(`${pre}${action} ${sf.pat}`, "Specify packets to " + (action === "permit" ? "forward" : "reject"), (c, a) => add(c, a, "standard", { action, src: sf.get(a) }), when));
+      }
+      if (!kinds.includes("extended")) continue;
+      for (const proto of ["ip", "icmp", "tcp", "udp"] as const) {
+        for (const df of DST_FORMS) {
+          const base = `${pre}${action} ${proto} ${sf.pat} ${df.pat}`;
+          out.push(spec(base, "Specify packets to " + (action === "permit" ? "forward" : "reject"), (c, a) =>
+            add(c, a, "extended", { action, proto, src: sf.get(a), dst: df.get(a) }), when));
+          if (proto === "tcp" || proto === "udp") {
+            out.push(spec(`${base} eq <word:port>`, "Match only packets on a given port number", (c, a) => {
+              const port = parsePort(proto, String(a.port));
+              if (port === null) return fail(c, "% Invalid input detected at '^' marker.", `% Give a port number or a ${proto.toUpperCase()} port name (e.g. ${proto === "tcp" ? "www, telnet, 443" : "domain, ntp, 514"}).`);
+              add(c, a, "extended", { action, proto, src: sf.get(a), dst: df.get(a), port });
+            }, when));
+          }
         }
       }
     }
   }
+  return out;
+}
+
+const aclSpecs: S[] = aceSpecs("access-list <int:n>", addAce, isRouter, ["standard", "extended"]);
+
+/** Named-list entries carry sequence numbers; numbered lists edited in named mode get them on entry. */
+function numberEntries(list: AclEntry[]) {
+  list.forEach((e, i) => {
+    e.seq ??= (i + 1) * 10;
+  });
+}
+
+function addNamedAce(c: Ctx, a: Args, _kind: "standard" | "extended", entry: AclEntry) {
+  const list = (c.dev.acls[c.dev.ctx.acl!] ??= []);
+  numberEntries(list);
+  const same = (x: AclEntry) => JSON.stringify({ ...x, seq: undefined }) === JSON.stringify({ ...entry, seq: undefined });
+  if (list.some(same)) return;
+  const seq = a.seq !== undefined ? Number(a.seq) : Math.max(0, ...list.map((e) => e.seq!)) + 10;
+  if (seq < 1 || seq > 2147483647) return fail(c, "% Invalid input detected at '^' marker.");
+  if (list.some((e) => e.seq === seq)) return fail(c, "% Duplicate sequence number");
+  list.push({ ...entry, seq });
+  list.sort((x, y) => x.seq! - y.seq!);
+}
+
+const naclKind = (kind: "standard" | "extended") => (d: Device) => !!d.ctx.acl && aclType(d, d.ctx.acl) === kind;
+
+function enterNamedAcl(c: Ctx, kind: "standard" | "extended", name: string) {
+  if (/^\d+$/.test(name)) {
+    if (aclKind(Number(name)) !== kind) return fail(c, `% ${name} is not a valid ${kind} access list number`);
+  } else {
+    const existing = c.dev.namedAcls[name];
+    if (existing && existing !== kind) return fail(c, `% A named ${existing} IP access list with this name already exists`);
+    c.dev.namedAcls[name] = kind;
+  }
+  numberEntries((c.dev.acls[name] ??= []));
+  setMode(c, "nacl", { acl: name });
 }
 
 function genKeys(c: Ctx, bits: number) {
@@ -499,6 +620,87 @@ const globalConfig: S[] = [
   spec("line vty <int:a> <int:b>", "Virtual terminal", (c, a) => {
     if (Number(a.a) !== 0 || Number(a.b) < 4 || Number(a.b) > 15) return fail(c, "% Invalid input detected at '^' marker.", "% Use 'line vty 0 4' or 'line vty 0 15' in this lab.");
     setMode(c, "line", { line: "vty" });
+  }),
+  ...(["standard", "extended"] as const).flatMap((kind) => [
+    spec<Ctx>(`ip access-list ${kind} <word:name>`, `${kind[0].toUpperCase() + kind.slice(1)} Access List`, (c, a) => enterNamedAcl(c, kind, String(a.name)), isRouter),
+    spec<Ctx>(`no ip access-list ${kind} <word:name>`, `${kind[0].toUpperCase() + kind.slice(1)} Access List`, (c, a) => {
+      const name = String(a.name);
+      delete c.dev.acls[name];
+      delete c.dev.namedAcls[name];
+    }, isRouter),
+  ]),
+  spec("ntp server <ip:addr>", "Configure NTP server", (c, a) => {
+    const addr = ip(a.addr);
+    if (!c.dev.mgmt.ntpServers.includes(addr)) c.dev.mgmt.ntpServers.push(addr);
+  }),
+  spec("no ntp server <ip:addr>", "Configure NTP server", (c, a) => {
+    c.dev.mgmt.ntpServers = c.dev.mgmt.ntpServers.filter((x) => x !== ip(a.addr));
+  }),
+  spec("ntp master", "Act as NTP master clock", (c) => {
+    c.dev.mgmt.ntpMaster = 8;
+  }, isRouter),
+  spec("ntp master <int:stratum>", "Act as NTP master clock", (c, a) => {
+    const st = Number(a.stratum);
+    if (st < 1 || st > 15) return fail(c, "% Invalid input detected at '^' marker.");
+    c.dev.mgmt.ntpMaster = st;
+  }, isRouter),
+  spec("no ntp master", "Act as NTP master clock", (c) => {
+    delete c.dev.mgmt.ntpMaster;
+  }, isRouter),
+  spec("clock timezone <word:zone> <word:hours>", "Configure time zone", (c, a) => {
+    const h = Number(a.hours);
+    if (!Number.isInteger(h) || h < -23 || h > 23) return fail(c, "% Invalid input detected at '^' marker.");
+    c.dev.mgmt.timezone = { name: String(a.zone), offset: h };
+  }),
+  ...["logging host <ip:h>", "logging <ip:h>"].map((pat) =>
+    spec<Ctx>(pat, "Set syslog server IP address and parameters", (c, a) => {
+      const h = ip(a.h);
+      if (!c.dev.mgmt.logHosts.includes(h)) c.dev.mgmt.logHosts.push(h);
+    }),
+  ),
+  spec("no logging host <ip:h>", "Set syslog server IP address and parameters", (c, a) => {
+    c.dev.mgmt.logHosts = c.dev.mgmt.logHosts.filter((x) => x !== ip(a.h));
+  }),
+  spec("logging trap <word:level>", "Set syslog server logging level", (c, a) => {
+    const t = String(a.level).toLowerCase();
+    const n = /^[0-7]$/.test(t) ? Number(t) : SEVERITIES.findIndex((x) => x.startsWith(t));
+    if (n < 0) return fail(c, "% Invalid input detected at '^' marker.", `% Levels: 0-7 or ${SEVERITIES.join(", ")}`);
+    c.dev.mgmt.logTrap = n;
+  }),
+  ...["service timestamps log datetime msec", "service timestamps log datetime", "service timestamps"].map((pat) =>
+    spec<Ctx>(pat, "Timestamp debug/log messages", (c) => {
+      c.dev.mgmt.timestamps = true;
+    }),
+  ),
+  spec("no service timestamps", "Timestamp debug/log messages", (c) => {
+    c.dev.mgmt.timestamps = false;
+  }),
+  ...(["ro", "rw"] as const).map((access) =>
+    spec<Ctx>(`snmp-server community <word:name> ${access}`, access === "ro" ? "Read-only access with this community string" : "Read-write access with this community string", (c, a) => {
+      const name = String(a.name);
+      c.dev.mgmt.snmp = [...c.dev.mgmt.snmp.filter((x) => x.name !== name), { name, access }];
+    }),
+  ),
+  spec("no snmp-server community <word:name>", "Enable SNMP; set community string and access privs", (c, a) => {
+    c.dev.mgmt.snmp = c.dev.mgmt.snmp.filter((x) => x.name !== String(a.name));
+  }),
+  spec("snmp-server location <line:text>", "Text for mib object sysLocation", (c, a) => {
+    c.dev.mgmt.snmpLocation = String(a.text);
+  }),
+  spec("snmp-server contact <line:text>", "Text for mib object sysContact", (c, a) => {
+    c.dev.mgmt.snmpContact = String(a.text);
+  }),
+  spec("cdp run", "Enable CDP", (c) => {
+    c.dev.mgmt.cdp = true;
+  }),
+  spec("no cdp run", "Enable CDP", (c) => {
+    c.dev.mgmt.cdp = false;
+  }),
+  spec("lldp run", "Enable LLDP", (c) => {
+    c.dev.mgmt.lldp = true;
+  }),
+  spec("no lldp run", "Enable LLDP", (c) => {
+    c.dev.mgmt.lldp = false;
   }),
   spec("ip routing", "Enable IP routing", () => {}),
   spec("ipv6 unicast-routing", "Enable unicast routing", (c) => {
@@ -717,6 +919,87 @@ const ifConfig: S[] = [
       if (i.acl) delete i.acl[dir];
     }, (d: Device) => isRouter(d) && onL3If(d)),
   ]),
+  spec("ip helper-address <ip:addr>", "Specify a destination address for UDP broadcasts", (c, a) => {
+    curIf(c).helper = ip(a.addr);
+  }, (d) => isRouter(d) && onL3If(d)),
+  spec("no ip helper-address", "Specify a destination address for UDP broadcasts", (c) => {
+    delete curIf(c).helper;
+  }, (d) => isRouter(d) && onL3If(d)),
+  spec("no ip helper-address <ip:addr>", "Specify a destination address for UDP broadcasts", (c) => {
+    delete curIf(c).helper;
+  }, (d) => isRouter(d) && onL3If(d)),
+  spec("ip ospf priority <int:p>", "Router priority", (c, a) => {
+    const p = Number(a.p);
+    if (p > 255) return fail(c, "% Invalid input detected at '^' marker.");
+    curIf(c).ospfPriority = p;
+  }, (d) => isRouter(d) && onL3If(d)),
+  spec("no ip ospf priority", "Router priority", (c) => {
+    delete curIf(c).ospfPriority;
+  }, (d) => isRouter(d) && onL3If(d)),
+  spec("switchport mode dynamic desirable", "Set trunking mode dynamic negotiation parameter to DESIRABLE", (c) => {
+    curIf(c).switchport!.mode = "desirable";
+    delete curIf(c).switchport!.nonegotiate;
+  }, onSwitchPort),
+  spec("switchport mode dynamic auto", "Set trunking mode dynamic negotiation parameter to AUTO", (c) => {
+    curIf(c).switchport!.mode = "dynamic";
+    delete curIf(c).switchport!.nonegotiate;
+  }, onSwitchPort),
+  spec("switchport nonegotiate", "Device will not engage in negotiation protocol on this interface", (c) => {
+    const sp = curIf(c).switchport!;
+    if (sp.mode === "dynamic" || sp.mode === "desirable") return fail(c, "Command rejected: Conflict between 'nonegotiate' and 'dynamic' status.");
+    sp.nonegotiate = true;
+  }, onSwitchPort),
+  spec("no switchport nonegotiate", "Device will not engage in negotiation protocol on this interface", (c) => {
+    delete curIf(c).switchport!.nonegotiate;
+  }, onSwitchPort),
+  spec("switchport trunk native vlan <int:id>", "Set native VLAN when interface is in trunking mode", (c, a) => {
+    const id = Number(a.id);
+    if (id < 1 || id > 4094) return fail(c, "% Invalid input detected at '^' marker.");
+    curIf(c).switchport!.nativeVlan = id;
+  }, onSwitchPort),
+  spec("no switchport trunk native vlan", "Set native VLAN when interface is in trunking mode", (c) => {
+    delete curIf(c).switchport!.nativeVlan;
+  }, onSwitchPort),
+  spec("switchport trunk allowed vlan add <word:list>", "add VLANs to the current list", (c, a) => {
+    const ids = parseVlanList(c, String(a.list));
+    const sp = curIf(c).switchport!;
+    if (ids && sp.allowedVlans) sp.allowedVlans = [...new Set([...sp.allowedVlans, ...ids])].sort((x, y) => x - y);
+  }, onSwitchPort),
+  spec("switchport trunk allowed vlan remove <word:list>", "remove VLANs from the current list", (c, a) => {
+    const ids = parseVlanList(c, String(a.list));
+    const sp = curIf(c).switchport!;
+    if (!ids) return;
+    const base = sp.allowedVlans ?? Array.from({ length: 4094 }, (_, k) => k + 1);
+    sp.allowedVlans = base.filter((v) => !ids.includes(v));
+  }, onSwitchPort),
+  spec("switchport trunk allowed vlan <word:list>", "Set allowed VLAN characteristics when interface is in trunking mode", (c, a) => {
+    const t = String(a.list).toLowerCase();
+    const sp = curIf(c).switchport!;
+    if (t === "all") return void delete sp.allowedVlans;
+    if (t === "none") return void (sp.allowedVlans = []);
+    const ids = parseVlanList(c, t);
+    if (ids) sp.allowedVlans = ids;
+  }, onSwitchPort),
+  spec("no switchport trunk allowed vlan", "Set allowed VLAN characteristics when interface is in trunking mode", (c) => {
+    delete curIf(c).switchport!.allowedVlans;
+  }, onSwitchPort),
+  spec("cdp enable", "Enable CDP on interface", (c) => {
+    delete curIf(c).cdp;
+  }),
+  spec("no cdp enable", "Enable CDP on interface", (c) => {
+    curIf(c).cdp = false;
+  }),
+  ...(["transmit", "receive"] as const).flatMap((dir) => {
+    const key = dir === "transmit" ? "lldpTx" : "lldpRx";
+    return [
+      spec<Ctx>(`lldp ${dir}`, `Enable LLDP ${dir} on interface`, (c) => {
+        delete curIf(c)[key];
+      }),
+      spec<Ctx>(`no lldp ${dir}`, `Enable LLDP ${dir} on interface`, (c) => {
+        curIf(c)[key] = false;
+      }),
+    ];
+  }),
   spec("exit", "Exit from interface configuration mode", (c) => setMode(c, "config")),
   ...common,
 ];
@@ -743,6 +1026,22 @@ const routerConfig: S[] = [
   }),
   spec("no router-id", "router-id for this OSPF process", (c) => {
     delete c.dev.ospf!.routerId;
+  }),
+  spec("passive-interface <iface:name>", "Suppress routing updates on an interface", (c, a) => {
+    const o = c.dev.ospf!;
+    const name = String(a.name);
+    if (!c.dev.interfaces[name]) return fail(c, "% Invalid input detected at '^' marker.");
+    o.passive = [...new Set([...(o.passive ?? []), name])];
+  }),
+  spec("no passive-interface <iface:name>", "Suppress routing updates on an interface", (c, a) => {
+    const o = c.dev.ospf!;
+    o.passive = (o.passive ?? []).filter((x) => x !== String(a.name));
+  }),
+  spec("default-information originate", "Distribute a default route", (c) => {
+    c.dev.ospf!.defaultOriginate = true;
+  }),
+  spec("no default-information originate", "Distribute a default route", (c) => {
+    delete c.dev.ospf!.defaultOriginate;
   }),
   spec("exit", "Exit from routing protocol configuration mode", (c) => setMode(c, "config")),
   ...common,
@@ -804,6 +1103,21 @@ const lineConfig: S[] = [
   spec("exec-timeout <int:m> <int:s>", "Set the EXEC timeout", () => {}),
   spec("logging synchronous", "Synchronized message output", () => {}),
   spec("exit", "Exit from line configuration mode", (c) => setMode(c, "config")),
+  ...common,
+];
+
+const naclConfig: S[] = [
+  ...aceSpecs("", addNamedAce, naclKind("standard"), ["standard"]),
+  ...aceSpecs("<int:seq>", addNamedAce, naclKind("standard"), ["standard"]),
+  ...aceSpecs("", addNamedAce, naclKind("extended"), ["extended"]),
+  ...aceSpecs("<int:seq>", addNamedAce, naclKind("extended"), ["extended"]),
+  spec("no <int:seq>", "Delete an entry by its sequence number", (c, a) => {
+    const list = c.dev.acls[c.dev.ctx.acl!] ?? [];
+    numberEntries(list);
+    c.dev.acls[c.dev.ctx.acl!] = list.filter((e) => e.seq !== Number(a.seq));
+  }),
+  spec("remark <line:text>", "Access list entry comment", () => {}),
+  spec("exit", "Exit from access-list configuration mode", (c) => setMode(c, "config")),
   ...common,
 ];
 
@@ -910,9 +1224,25 @@ const pcCommands: S[] = [
     delete c.dev.dhcpServer;
     pcIpconfig(c);
   }),
+  spec("curl <word:url>", "Fetch a web page (HTTP or HTTPS)", (c, a) => {
+    const m = /^(?:(https?):\/\/)?([\d.]+)(?::(\d+))?\/?$/i.exec(String(a.url));
+    const host = m && parseIp(m[2]);
+    if (!m || host === null) return fail(c, `curl: (6) Could not resolve host: ${a.url}`, "Lab note: use an IP address, e.g. curl http://172.16.1.10");
+    const scheme = (m[1] ?? "http").toLowerCase();
+    const port = m[3] ? Number(m[3]) : scheme === "https" ? 443 : 80;
+    const r = tcpConnect(c.state, c.dev.id, host!, port);
+    const t = formatIp(host!);
+    if (r === "open") return void c.out.push(`HTTP/1.1 200 OK`, `Server: lab-httpd`, "", `<html><body><h1>It works! (${t} port ${port})</h1></body></html>`);
+    if (r === "refused") return fail(c, `curl: (7) Failed to connect to ${t} port ${port}: Connection refused`);
+    if (r === "unreachable") return fail(c, `curl: (7) Failed to connect to ${t} port ${port}: No route to host`);
+    fail(c, `curl: (28) Failed to connect to ${t} port ${port}: Timed out`);
+  }),
+  spec("telnet <ip:dst>", "Open a Telnet session (TCP 23)", (c, a) => c.out.push(...tcpLines(c, String(a.dst), 23, "telnet"))),
+  spec("telnet <ip:dst> <int:port>", "Test a TCP port", (c, a) => c.out.push(...tcpLines(c, String(a.dst), Number(a.port), "telnet"))),
+  spec("ssh -l <word:user> <ip:dst>", "Open an SSH session (TCP 22)", (c, a) => c.out.push(...tcpLines(c, String(a.dst), 22, "ssh"))),
   spec("ping <ip:dst>", "Send echo messages", (c, a) => pcPing(c, String(a.dst))),
   spec("help", "Display PC commands", (c) => {
-    c.out.push("Available Commands:", "  ipconfig                         Display IP configuration", "  ipconfig <ip> <mask> <gateway>   Set IP configuration", "  ipconfig /dhcp                   Get an address from DHCP", "  ipconfig /release                Release the DHCP address", "  ipv6config <addr/len> <gateway>  Set IPv6 address and gateway", "  ipv6config autoconfig            Get an IPv6 address by SLAAC", "  ping <ip>                        Send echo request");
+    c.out.push("Available Commands:", "  ipconfig                         Display IP configuration", "  ipconfig <ip> <mask> <gateway>   Set IP configuration", "  ipconfig /dhcp                   Get an address from DHCP", "  ipconfig /release                Release the DHCP address", "  ipv6config <addr/len> <gateway>  Set IPv6 address and gateway", "  ipv6config autoconfig            Get an IPv6 address by SLAAC", "  ping <ip>                        Send echo request", "  curl http://<ip>  |  https://<ip> Fetch a web page (TCP 80 / 443)", "  telnet <ip> [port]               Telnet, or test any TCP port", "  ssh -l <user> <ip>               Open an SSH session (TCP 22)");
   }),
 ];
 
@@ -925,8 +1255,9 @@ export const MODE_SPECS: Record<Mode, S[]> = {
   vlan: vlanConfig,
   dhcp: dhcpConfig,
   line: lineConfig,
+  nacl: naclConfig,
   pc: pcCommands,
 };
 
 /** Sub-modes fall back to global config commands, like real IOS. */
-export const PARENT: Partial<Record<Mode, Mode>> = { if: "config", router: "config", vlan: "config", dhcp: "config", line: "config" };
+export const PARENT: Partial<Record<Mode, Mode>> = { if: "config", router: "config", vlan: "config", dhcp: "config", line: "config", nacl: "config" };
